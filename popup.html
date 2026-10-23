@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<style>
+  body{font-family:'Segoe UI',sans-serif;width:320px;margin:0;padding:14px;background:#F9FDF9;color:#1b2b1b}
+  h1{font-size:15px;margin:0 0 4px} .muted{color:#5f7263;font-size:12px}
+  .card{background:#fff;border:1px solid #DCEFDC;border-radius:14px;padding:10px 12px;margin-top:10px}
+  .row{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:6px 0}
+  button{background:#2E7D32;color:#fff;border:0;border-radius:10px;padding:7px 12px;cursor:pointer;font-weight:600}
+  button.ghost{background:transparent;color:#2E7D32;border:1px solid #2E7D32}
+  input[type=text]{width:100%;padding:7px 9px;border:1px solid #C8E6C9;border-radius:9px;box-sizing:border-box}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#bbb;margin-right:6px}
+  .dot.on{background:#43A047}.dot.err{background:#E53935}
+  label{font-size:13px}
+</style>
+</head>
+<body>
+  <h1>🐼 Cyan Panda Watcher <span class="muted">v1.0.0</span></h1>
+  <div class="muted">Cầu nối giữa TikTok web và Cyan Panda Tool (qua Supabase).</div>
+
+  <div class="card">
+    <div><span class="dot" id="stDot"></span><b id="stText">Đang kiểm tra…</b></div>
+    <div class="muted" id="stDetail" style="margin-top:4px">—</div>
+    <div class="row" style="margin-top:8px">
+      <button id="btnScan">🔄 Quét ngay</button>
+      <button class="ghost" id="btnTool">Mở Cyan Panda Tool</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row"><label>Quét data từ TikTok web → Supabase</label><input type="checkbox" id="ckCapture"></div>
+    <div class="row"><label>Chế độ treo: tự rep tin đã duyệt/tin thường</label><input type="checkbox" id="ckAuto"></div>
+    <div style="margin-top:8px"><label>@username TikTok của tab này</label>
+      <input type="text" id="inAccount" placeholder="vd: cyan.khotinh (để trống = tự đoán)"></div>
+    <div class="row" style="margin-top:10px"><span class="muted">Thay đổi có hiệu lực ngay, không cần tải lại trang.</span><button id="btnSave">Lưu</button></div>
+  </div>
+
+  <div class="muted" style="margin-top:10px">⚠️ Tự rep chỉ chạy khi: tab TikTok đang mở + máy không ngủ + còn đăng nhập. Gặp CAPTCHA, Watcher dừng và báo — bạn xử lý tay ~5 giây là nó chạy tiếp.</div>
+  <script src="popup.js"></script>
+</body>
+</html>
