@@ -230,7 +230,7 @@
   /* ---------- Heartbeat ---------- */
   function heartbeat() {
     state.account = guessAccount();
-    var value = { account: state.account, accountId: cfg.accountId || '', url: location.href, at: new Date().toISOString(), version: '1.1.1', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError };
+    var value = { account: state.account, accountId: cfg.accountId || '', url: location.href, at: new Date().toISOString(), version: '1.2.1', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError };
     supa('app_state?on_conflict=key', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: { key: 'watcher_status', value: value, updated_at: new Date().toISOString() } }).catch(function () {});
     saveStats();
   }
@@ -356,16 +356,27 @@
 
   storageGet().then(function (o) {
     if (o.pandaWatcherCfg) cfg = Object.assign({}, cfg, o.pandaWatcherCfg);
-    injectHook();
-    buildChip();
-    setInterval(buildChip, 4000);
-    setInterval(renderChip, 5000);
-    setInterval(domScan, (cfg.domScanSec || 20) * 1000);
-    setInterval(heartbeat, (cfg.heartbeatSec || 60) * 1000);
-    setInterval(function () { detectCaptcha(); pollQueue(); }, (cfg.queuePollSec || 8) * 1000);
-    setInterval(pollOpenCommand, (cfg.openPollSec || 10) * 1000);
-    setTimeout(function () { domScan(); heartbeat(); }, 3000);
-    logBE('WATCHER_START', 'Watcher khởi động trên tab TikTok (account: ' + (guessAccount() || 'chưa rõ') + ')', 'WATCHER_000');
+    // v1.2.1: tự nhận Account ID từ bản web (bridge ghi pandaWatcherAccountId / pandaWatcherLogin)
+    // để tin đẩy lên gắn đúng acc mà không cần điền tay; ô nhập popup chỉ còn là ghi đè thủ công.
+    var boot = function () {
+      injectHook();
+      buildChip();
+      setInterval(buildChip, 4000);
+      setInterval(renderChip, 5000);
+      setInterval(domScan, (cfg.domScanSec || 20) * 1000);
+      setInterval(heartbeat, (cfg.heartbeatSec || 60) * 1000);
+      setInterval(function () { detectCaptcha(); pollQueue(); }, (cfg.queuePollSec || 8) * 1000);
+      setInterval(pollOpenCommand, (cfg.openPollSec || 10) * 1000);
+      setTimeout(function () { domScan(); heartbeat(); }, 3000);
+      logBE('WATCHER_START', 'Watcher khởi động trên tab TikTok (account: ' + (guessAccount() || 'chưa rõ') + ')', 'WATCHER_000');
+    };
+    try {
+      chrome.storage.local.get(['pandaWatcherLogin', 'pandaWatcherAccountId'], function (a) {
+        var autoId = (a && a.pandaWatcherLogin && a.pandaWatcherLogin.account && a.pandaWatcherLogin.account.open_id) || (a && a.pandaWatcherAccountId && a.pandaWatcherAccountId.open_id) || '';
+        if (autoId && !cfg.accountId) { cfg.accountId = autoId; storageSet({ pandaWatcherCfg: cfg }); }
+        boot();
+      });
+    } catch (e) { boot(); }
   });
 
   try {

@@ -23,6 +23,8 @@
     try {
       localStorage.setItem('panda_real_token_v262', JSON.stringify(stored.token));
       localStorage.setItem('panda_real_account_v262', JSON.stringify(stored.account));
+      // v1.2.1: đồng thời ghi open_id sang chrome.storage để Watcher (tab TikTok) tự nhận, khỏi điền tay.
+      try { if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local && stored.account.open_id) chrome.storage.local.set({ pandaWatcherAccountId: { open_id: stored.account.open_id, username: stored.account.username || '', at: Date.now() } }); } catch (e2) {}
       return true;
     } catch (e) { return false; }
   }

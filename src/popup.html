@@ -16,7 +16,7 @@
 </style>
 </head>
 <body>
-  <h1>🐼 Cyan Panda Watcher <span class="muted">v1.2.0</span></h1>
+  <h1>🐼 Cyan Panda Watcher <span class="muted">v1.2.1</span></h1>
   <div class="muted">Cầu nối giữa TikTok web và Cyan Panda Tool (qua Supabase).</div>
 
   <div class="card">
@@ -28,7 +28,6 @@
     </div>
     <div class="row" style="margin-top:8px">
       <button id="btnSuite">🏢 Mở Business Suite Messages</button>
-      <button class="ghost" id="btnReload">↻ Tải lại tab TikTok</button>
     </div>
     <div class="row" style="margin-top:8px">
       <button id="btnToolFull">🧰 Mở Tool đầy đủ (tab Watcher)</button>
@@ -40,13 +39,14 @@
     <div class="row"><label>Quét data từ TikTok web → Supabase</label><input type="checkbox" id="ckCapture"></div>
     <div class="row"><label>Tự trả lời: tự gửi tin mới (tin nhạy cảm: hùa theo nhẹ, an toàn khi chụp màn hình)</label><input type="checkbox" id="ckAuto"></div>
     <div style="margin-top:8px"><label>@username TikTok của tab này</label>
-      <input type="text" id="inAccount" placeholder="vd: cyan.khotinh (để trống = tự đoán)"></div>
-    <div style="margin-top:8px"><label>Account ID (open_id) — copy từ tool web, tab Kết Nối</label>
-      <input type="text" id="inAccountId" placeholder="vd: 1234567890 (để trống = chỉ gửi lệnh cũ chưa gắn acc)"></div>
+      <input type="text" id="inAccount" placeholder="Tự nhận từ trang TikTok đang mở"></div>
+    <div style="margin-top:8px"><label>Account ID (open_id) — tự nhận từ bản web khi đã đăng nhập</label>
+      <input type="text" id="inAccountId" placeholder="Tự nhận từ bản web — chỉ điền tay khi chưa tự nhận được"></div>
+    <div class="muted" id="autoNote" style="margin-top:4px">—</div>
     <div class="row" style="margin-top:10px"><span class="muted">Thay đổi có hiệu lực ngay, không cần tải lại trang.</span><button id="btnSave">Lưu</button></div>
   </div>
 
-  <div class="muted" style="margin-top:10px">⚠️ Tự trả lời chỉ chạy khi: tab TikTok đang mở + máy không ngủ + còn đăng nhập. Gặp CAPTCHA, Watcher dừng và báo — bạn xử lý tay ~5 giây là nó chạy tiếp (bấm “Tải lại tab TikTok” sau khi giải xong để trang sạch lại).</div>
+  <div class="muted" style="margin-top:10px">⚠️ Tự trả lời chỉ chạy khi: tab TikTok đang mở + máy không ngủ + còn đăng nhập. Gặp CAPTCHA, Watcher dừng và báo — bạn xử lý tay ~5 giây rồi bấm “Mở Business Suite Messages” để trang tải lại sạch rồi nó chạy tiếp.</div>
   <script src="popup.js"></script>
 </body>
 </html>
