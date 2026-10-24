@@ -56,6 +56,10 @@
     });
   });
 
+  $('btnToolFull').addEventListener('click', function () {
+    chrome.tabs.create({ url: chrome.runtime.getURL('src/tool.html') });
+  });
+
   $('btnSuite').addEventListener('click', function () {
     chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
       var t = tabs && tabs[0];
