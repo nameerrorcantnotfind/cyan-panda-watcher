@@ -14,7 +14,7 @@
   if (!CORE) return;
 
   var cfg = Object.assign({}, D);
-  var state = { account: '', identity: null, profileById: {}, profileByName: {}, domSeen: {}, startedAt: Date.now(), lastSync: null, lastPush: 0, pushedTotal: 0, capturedTotal: 0, captcha: false, lastError: '', queueBusy: false };
+  var state = { account: '', identity: null, profileById: {}, profileByName: {}, domSeen: {}, startedAt: Date.now(), lastSync: null, lastPush: 0, pushedTotal: 0, capturedTotal: 0, captcha: false, lastError: '', queueBusy: false, listStats: null };
   var pushedKeys = new Set();
   var buffer = [];
   var flushTimer = null;
@@ -50,6 +50,92 @@
     var a = document.querySelector('a[href^="/@"]');
     if (a) { var m = a.getAttribute('href').match(/^\/@([^\/]+)/); if (m) return m[1]; }
     return state.account || '';
+  }
+
+  /* ---------- v1.2.4: Fallback identity DOM — NHIỀU selector, log selector đã khớp ---------- */
+  // Heuristic v1.2.3 (link avatar header/nav, top<150 + có ảnh) CHƯA kiểm chứng trên header
+  // thật của Business Suite — header thật có thể dùng cấu trúc khác nên fallback cũ có thể
+  // không nhận ra. v1.2.4 thử NHIỀU chiến lược theo thứ tự ưu tiên, lấy cái đầu tiên khớp,
+  // và LOG selector đã khớp (BE log WATCHER_006 + lưu vào pandaWatcherIdentity.selector)
+  // để chẩn đoán sau. Chỉ nhận link/ảnh trong vùng header/nav hoặc dải trên (top<150) —
+  // KHÔNG lấy link /@ bất kỳ trên trang (tiêu đề hội thoại có thể link tới đối tác,
+  // lấy nhầm sẽ gắn sai tài khoản). Identity mạng (source 'tab') luôn thắng và không
+  // bao giờ bị DOM ghi đè.
+  var domIdentityLogged = '';
+  function elInTopBar(node) {
+    while (node) {
+      var tag = node.tagName || '';
+      if (tag === 'HEADER' || tag === 'NAV') return true;
+      try { if (node.getAttribute && node.getAttribute('role') === 'banner') return true; } catch (e) {}
+      node = node.parentElement;
+    }
+    return false;
+  }
+  function elTop(node) { try { var r = node.getBoundingClientRect(); return r ? r.top : 1e9; } catch (e) { return 1e9; } }
+  function elHasImg(node) { try { return !!node.querySelector('img'); } catch (e) { return false; } }
+  function domIdentityCandidates() {
+    var buckets = { 'header-avatar-img': [], 'header-link': [], 'top-avatar-img': [], 'header-aria': [], 'avatar-alt': [] };
+    function push(bucket, u) { if (u && buckets[bucket].indexOf(u) === -1) buckets[bucket].push(u); }
+    var userRe = /^\/@([A-Za-z0-9._]{2,24})(?:[?#\/]|$)/;
+    var atRe = /@([A-Za-z0-9._]{2,24})/;
+    try {
+      var links = document.querySelectorAll('a');
+      for (var i = 0; i < links.length; i++) {
+        var href = '';
+        try { href = links[i].getAttribute ? (links[i].getAttribute('href') || '') : ''; } catch (e) {}
+        var m = href.match(userRe);
+        if (!m) continue;
+        var inTop = elInTopBar(links[i]);
+        var hasImg = elHasImg(links[i]);
+        var top = elTop(links[i]);
+        if (inTop && hasImg && top < 150) push('header-avatar-img', m[1]);
+        else if (inTop) push('header-link', m[1]);
+        else if (hasImg && top < 150) push('top-avatar-img', m[1]);
+      }
+      var all = document.querySelectorAll('*');
+      for (var j = 0; j < all.length; j++) {
+        if (!elInTopBar(all[j])) continue;
+        var attrs = [];
+        try { attrs.push(all[j].getAttribute ? (all[j].getAttribute('aria-label') || '') : ''); attrs.push(all[j].getAttribute ? (all[j].getAttribute('title') || '') : ''); } catch (e) {}
+        for (var k = 0; k < attrs.length; k++) {
+          var am = String(attrs[k] || '').match(atRe);
+          if (am) push('header-aria', am[1]);
+        }
+      }
+      var imgs = document.querySelectorAll('img');
+      for (var q = 0; q < imgs.length; q++) {
+        var alt = '';
+        try { alt = (imgs[q].getAttribute ? (imgs[q].getAttribute('alt') || '') : '') + ' ' + (imgs[q].getAttribute ? (imgs[q].getAttribute('title') || '') : ''); } catch (e) {}
+        var im = alt.match(atRe);
+        if (im && elTop(imgs[q]) < 150) push('avatar-alt', im[1]);
+      }
+    } catch (e) {}
+    var order = ['header-avatar-img', 'header-link', 'top-avatar-img', 'header-aria', 'avatar-alt'];
+    var out = [];
+    for (var s = 0; s < order.length; s++) {
+      for (var t = 0; t < buckets[order[s]].length; t++) out.push({ username: buckets[order[s]][t], selector: order[s] });
+    }
+    return out;
+  }
+  function detectDomIdentity() {
+    if (state.identity && state.identity.source === 'tab') return state.identity;
+    try {
+      var cands = domIdentityCandidates();
+      if (!cands.length) return state.identity || null;
+      var chosen = cands[0];
+      if (state.identity && state.identity.username === chosen.username && state.identity.selector === chosen.selector) return state.identity;
+      var id = { username: chosen.username, user_id: '', user_id_str: '', sec_user_id: '', screen_name: '', avatar_url: '', source: 'dom', selector: chosen.selector };
+      state.identity = id;
+      state.account = chosen.username;
+      storageSet({ pandaWatcherIdentity: Object.assign({}, id, { at: Date.now() }) });
+      saveStats();
+      var logKey = chosen.username + '|' + chosen.selector;
+      if (domIdentityLogged !== logKey) {
+        domIdentityLogged = logKey;
+        logBE('WATCHER_IDENTITY', 'Tự nhận identity từ DOM tab TikTok: @' + chosen.username + ' (selector: ' + chosen.selector + ')', 'WATCHER_006');
+      }
+      return id;
+    } catch (e) { return state.identity || null; }
   }
 
   /* ---------- v1.1: Business Suite home + tim hoi thoai (ten hien thi + @username, khong dau) ---------- */
@@ -133,9 +219,13 @@
     await sleep(4500);
   }
 
-  /* ---------- Nhận data từ hook (page world) — v1.2.2: chỉ 2 endpoint allowlist ---------- */
+  /* ---------- Nhận data từ hook (MAIN world, document_start) — chỉ 2 endpoint allowlist ---------- */
+  // v1.2.3: hook.js chạy thẳng dưới dạng content script MAIN world ở document_start
+  // (khai trong manifest) nên chặn được fetch/XHR từ trước khi script của trang chạy,
+  // thay cho cơ chế cũ chèn thẻ script ở document_idle (cài muộn, lỡ gói passport sớm).
   function applyIdentity(id) {
     if (!id || !id.username) return;
+    id.source = 'tab';   // v1.2.3: đóng dấu nguồn mạng — detectDomIdentity() dựa vào dấu này để không ghi đè
     state.identity = id;
     state.account = id.username;
     if (!cfg.account) cfg.account = id.username;
@@ -281,6 +371,57 @@
     } catch (e) {}
     return false;
   }
+  function isInside(el, anc) {
+    var n = el ? el.parentElement : null;
+    while (n) { if (n === anc) return true; n = n.parentElement; }
+    return false;
+  }
+  function findListColumn() {
+    // Cột danh sách = cột chứa tiêu đề h2 "Tin nhắn". Đi ngược từ h2 lên trong khi
+    // phần tử cha vẫn hẹp (<= 55% bề rộng trang) — cột danh sách luôn hẹp hơn cột chat.
+    try {
+      var heads = document.querySelectorAll('h2');
+      var h = null;
+      for (var i = 0; i < heads.length; i++) { if (normText(heads[i].innerText) === 'tin nhan') { h = heads[i]; break; } }
+      if (!h) return null;
+      var bodyW = 0;
+      try { bodyW = document.body.getBoundingClientRect().width; } catch (e) {}
+      var cur = h.parentElement;
+      if (!cur) return h;
+      while (cur && cur.parentElement && cur.parentElement !== document.body) {
+        var pr = null;
+        try { pr = cur.parentElement.getBoundingClientRect(); } catch (e) { break; }
+        if (!pr || pr.width <= 0) break;
+        if (bodyW && pr.width > bodyW * 0.55) break;
+        cur = cur.parentElement;
+      }
+      return cur;
+    } catch (e) { return null; }
+  }
+  function findChatPaneFallback() {
+    // v1.2.4 (b): không neo được ô soạn -> lấy khung cuộn LỚN NHẤT ở cột phải
+    // (cột còn lại sau khi loại cột danh sách), không phụ thuộc class hash.
+    try {
+      var listCol = findListColumn();
+      var listRight = -1;
+      try { if (listCol) listRight = listCol.getBoundingClientRect().right; } catch (e) {}
+      var all = document.querySelectorAll('*');
+      var best = null, bestArea = -1;
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (!isScrollable(el)) continue;
+        if (containsListHeader(el)) continue;
+        if (listCol && (el === listCol || isInside(el, listCol))) continue;
+        var r = null;
+        try { r = el.getBoundingClientRect(); } catch (e) { continue; }
+        if (!r || r.width <= 0) continue;
+        if (listRight >= 0 && r.left < listRight - 20) continue;   // phải nằm ở cột phải
+        var area = r.width * r.height;
+        if (area > bestArea) { bestArea = area; best = el; }
+      }
+      return best;
+    } catch (e) { return null; }
+  }
   function findMessagePane(composer) {
     // Ưu tiên: container cuộn được nằm trên ô soạn, cùng cột chat, không chứa cột danh sách.
     var cands = [];
@@ -314,15 +455,31 @@
 
   function domScan() {
     if (!cfg.captureEnabled || location.pathname.indexOf('/messages') === -1) return;
+    detectDomIdentity();
     try {
       var composer = findComposer();
-      if (!composer) return;   // chưa mở hội thoại nào -> không có gì để quét
-      var pane = findMessagePane(composer);
-      if (!pane) return;
+      var pane = null;
+      if (composer) pane = findMessagePane(composer);
+      if (!pane) pane = findChatPaneFallback();   // v1.2.4 (b): không có ô soạn vẫn quét được cột phải
+      var listCol = null, pr = null, midX = 0;
+      if (pane) {
+        pr = pane.getBoundingClientRect();
+        midX = pr.left + pr.width / 2;
+      } else {
+        // v1.2.4 (c): vẫn không xác định được cột -> quét vùng nội dung chính nhưng
+        // loại mọi block thuộc cột danh sách; midX lấy từ vùng còn lại bên phải cột danh sách.
+        listCol = findListColumn();
+        var bodyR = null;
+        try { bodyR = document.body.getBoundingClientRect(); } catch (e) {}
+        var leftEdge = 0, rightEdge = bodyR ? bodyR.right : 1200;
+        if (listCol) { try { leftEdge = listCol.getBoundingClientRect().right; } catch (e) {} }
+        var effWidth = Math.max(1, rightEdge - leftEdge);
+        pr = { left: leftEdge, width: effWidth, right: rightEdge };
+        midX = leftEdge + effWidth / 2;
+        pane = document.body;
+      }
       var title = conversationTitle();
       var partnerUser = (title && state.profileByName[CORE.normName(title)]) || '';
-      var pr = pane.getBoundingClientRect();
-      var midX = pr.left + pr.width / 2;
       // Nhánh chứa ô soạn trong pane (để loại khỏi vùng quét khi pane là cột chat rộng)
       var composerBranch = null;
       (function () {
@@ -339,6 +496,7 @@
           if (insideComposer) continue;
         }
         if (el === composer) continue;
+        if (listCol && (el === listCol || isInside(el, listCol))) continue;   // v1.2.4 (c): loại cột danh sách
         var r = null;
         try { r = el.getBoundingClientRect(); } catch (e) { continue; }
         if (!r || r.width < 30 || r.width > pr.width * 0.92 || r.height <= 0) continue;
@@ -371,6 +529,113 @@
     } catch (e) {}
   }
 
+  /* ---------- v1.2.4: Quét DANH SÁCH hội thoại (không cần mở hội thoại) ---------- */
+  // User yêu cầu: ở màn hình danh sách cũng phải bắt được — ít nhất phân biệt được
+  // ai nhắn mà chưa rep. Mỗi dòng lấy: tên hiển thị (dòng đầu), preview tin cuối (dòng hai),
+  // thời gian (dòng khớp mẫu giờ/ngày, thường ở phía phải). Cờ chưa đọc CHỈ khi có dấu
+  // hiệu rõ (chữ đậm / thẻ B-STRONG / aria-label "chưa đọc"/"unread" / chấm chưa đọc) —
+  // best-effort, không có dấu hiệu thì null, KHÔNG đoán. Hướng: 'in' nếu có cờ chưa đọc
+  // (đó chính là "chưa rep"); 'out' nếu preview có tiền tố "Bạn:"/"You:"; còn lại null.
+  // TUYỆT ĐỐI không đoán hướng khi không có bằng chứng.
+  function timeLineOf(lines) {
+    for (var i = lines.length - 1; i >= 0; i--) {
+      if (/\d{1,2}:\d{2}/.test(lines[i]) || /\d{1,2}\/\d{1,2}(\/\d{4})?/.test(lines[i])) return { time: lines[i], idx: i };
+    }
+    return null;
+  }
+  function subtreeHasUnreadSignal(el) {
+    var nodes = [el];
+    try { var ds = el.querySelectorAll('*'); for (var i = 0; i < ds.length; i++) nodes.push(ds[i]); } catch (e) {}
+    for (var j = 0; j < nodes.length; j++) {
+      var n = nodes[j];
+      var tag = n.tagName || '';
+      if (tag === 'B' || tag === 'STRONG') return true;
+      try {
+        var fw = (n.style && n.style.fontWeight) || '';
+        if (fw === 'bold' || fw === '700' || fw === '600' || +fw >= 600) return true;
+      } catch (e) {}
+      try {
+        var lab = normText((n.getAttribute ? (n.getAttribute('aria-label') || '') : '') + ' ' + (n.getAttribute ? (n.getAttribute('title') || '') : ''));
+        if (lab.indexOf('chua doc') !== -1 || lab.indexOf('unread') !== -1) return true;
+      } catch (e) {}
+      try {
+        // Chấm chưa đọc thường là node lá chỉ chứa "●"/"•"
+        if (n.children && n.children.length === 0 && ((n.innerText || '').trim() === '●' || (n.innerText || '').trim() === '•')) return true;
+      } catch (e) {}
+    }
+    return false;
+  }
+  function extractListRows(col) {
+    var out = [], seen = new Set();
+    var nodes = [];
+    try { nodes = col.querySelectorAll('*'); } catch (e) { return out; }
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var raw = (el.innerText || '').trim();
+      if (!raw) continue;
+      var dup = false;
+      try {
+        var kids = el.querySelectorAll('*');
+        for (var k = 0; k < kids.length; k++) { if ((kids[k].innerText || '').trim() === raw) { dup = true; break; } }
+      } catch (e) {}
+      if (dup) continue;   // chỉ giữ khối trong cùng
+      var lines = raw.split('\n').map(function (s) { return s.trim(); }).filter(function (s) { return !!s; });
+      if (lines.length < 2 || lines.length > 5) continue;   // wrapper nhiều dòng không phải 1 dòng hội thoại
+      var name = lines[0];
+      if (!name || name.length > 60) continue;
+      if (normText(name) === 'tin nhan') continue;
+      var isHeaderLine = false;
+      for (var h = 0; h < Math.min(3, lines.length); h++) {
+        var nh = normText(lines[h]);
+        if (nh === 'bo loc' || nh === 'chi chua doc') { isHeaderLine = true; break; }
+      }
+      if (isHeaderLine) continue;
+      var tl = timeLineOf(lines);
+      if (!tl) continue;   // dòng hội thoại thật luôn có thời gian
+      var preview = lines.length > 1 ? lines[1] : '';
+      if (preview === tl.time) preview = '';
+      var unread = null, dir = null;
+      if (subtreeHasUnreadSignal(el)) { unread = true; dir = 'in'; }
+      else if (/^(Bạn|You)\s*:/.test(preview)) { dir = 'out'; }
+      var key = name + '|' + preview + '|' + tl.time;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ name: name, preview: preview, time: tl.time, unread: unread, direction: dir });
+    }
+    return out;
+  }
+  function listScan() {
+    if (!cfg.captureEnabled || location.pathname.indexOf('/messages') === -1) return;
+    try {
+      var col = findListColumn();
+      if (!col) return;
+      var rows = extractListRows(col);
+      if (!rows.length) return;
+      var acctKey = cfg.accountId || (state.identity && state.identity.username) || state.account || '';
+      var now = new Date().toISOString();
+      var upserts = rows.map(function (r) {
+        return {
+          account_id: acctKey,
+          counterpart: r.name,
+          counterpart_username: (r.name && state.profileByName[CORE.normName(r.name)]) || null,
+          last_preview: r.preview,
+          last_at: r.time,
+          unread: r.unread,
+          direction: r.direction,
+          updated_at: now
+        };
+      });
+      supa('conversations?on_conflict=account_id,counterpart', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: upserts }).catch(function () {});
+      var unreadCount = 0;
+      for (var i = 0; i < rows.length; i++) { if (rows[i].unread === true) unreadCount++; }
+      var changed = !state.listStats || state.listStats.total !== rows.length || state.listStats.unread !== unreadCount;
+      state.listStats = { total: rows.length, unread: unreadCount, at: now };
+      saveStats(); renderChip();
+      if (changed) logBE('WATCHER_LIST', 'Danh sách: ' + rows.length + ' hội thoại (' + unreadCount + ' chưa rep) -> Supabase', 'WATCHER_007');
+    } catch (e) {}
+  }
+  function scanAll() { domScan(); listScan(); }
+
   /* ---------- CAPTCHA ---------- */
   function detectCaptcha() {
     var found = !!document.querySelector('iframe[src*="captcha"], [class*="captcha"], [id*="captcha"], div[data-e2e*="captcha"]');
@@ -384,13 +649,16 @@
 
   /* ---------- Heartbeat ---------- */
   function heartbeat() {
+    detectDomIdentity();
     state.account = guessAccount();
-    var value = { account: state.account, accountId: cfg.accountId || '', identitySource: state.identity ? 'tab' : '', url: location.href, at: new Date().toISOString(), version: '1.2.2', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError };
+    var value = { account: state.account, accountId: cfg.accountId || '', identitySource: state.identity ? (state.identity.source || 'tab') : '', url: location.href, at: new Date().toISOString(), version: '1.2.4', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError };
     supa('app_state?on_conflict=key', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: { key: 'watcher_status', value: value, updated_at: new Date().toISOString() } }).catch(function () {});
     saveStats();
   }
   function saveStats() {
-    storageSet({ pandaWatcherStats: { lastSync: state.lastSync, lastPush: state.lastPush, pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError, account: state.account, at: Date.now() } });
+    var st = { lastSync: state.lastSync, lastPush: state.lastPush, pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError, account: state.account, at: Date.now() };
+    if (state.listStats) { st.listTotal = state.listStats.total; st.listUnread = state.listStats.unread; }
+    storageSet({ pandaWatcherStats: st });
   }
 
   /* ---------- Thực thi hàng đợi gửi (chỉ khi BẬT tự trả lời) ---------- */
@@ -516,29 +784,23 @@
   }
 
   /* ---------- Khởi động ---------- */
-  function injectHook() {
-    try {
-      var s = document.createElement('script');
-      s.src = chrome.runtime.getURL('src/hook.js');
-      s.onload = function () { s.remove(); };
-      (document.head || document.documentElement).appendChild(s);
-    } catch (e) {}
-  }
+  // v1.2.3: hook.js đã chạy sẵn dưới dạng content script MAIN world ở document_start
+  // (khai trong manifest) nên KHÔNG còn chèn thẻ script ở đây nữa.
 
   storageGet().then(function (o) {
     if (o.pandaWatcherCfg) cfg = Object.assign({}, cfg, o.pandaWatcherCfg);
     // v1.2.1: tự nhận Account ID từ bản web (bridge ghi pandaWatcherAccountId / pandaWatcherLogin)
     // để tin đẩy lên gắn đúng acc mà không cần điền tay; ô nhập popup chỉ còn là ghi đè thủ công.
     var boot = function () {
-      injectHook();
+      detectDomIdentity();
       buildChip();
       setInterval(buildChip, 4000);
       setInterval(renderChip, 5000);
-      setInterval(domScan, (cfg.domScanSec || 20) * 1000);
+      setInterval(scanAll, (cfg.domScanSec || 20) * 1000);
       setInterval(heartbeat, (cfg.heartbeatSec || 60) * 1000);
       setInterval(function () { detectCaptcha(); pollQueue(); }, (cfg.queuePollSec || 8) * 1000);
       setInterval(pollOpenCommand, (cfg.openPollSec || 10) * 1000);
-      setTimeout(function () { domScan(); heartbeat(); }, 3000);
+      setTimeout(function () { scanAll(); heartbeat(); }, 3000);
       logBE('WATCHER_START', 'Watcher khởi động trên tab TikTok (account: ' + (guessAccount() || 'chưa rõ') + ')', 'WATCHER_000');
     };
     try {
@@ -565,7 +827,7 @@
 
   try {
     chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-      if (msg && msg.type === 'PANDA_SCAN_NOW') { domScan(); flush(); heartbeat(); sendResponse({ ok: true, pushedTotal: state.pushedTotal }); }
+      if (msg && msg.type === 'PANDA_SCAN_NOW') { scanAll(); flush(); heartbeat(); sendResponse({ ok: true, pushedTotal: state.pushedTotal }); }
       if (msg && msg.type === 'PANDA_GET_STATE') { sendResponse({ state: state, cfg: { captureEnabled: cfg.captureEnabled, autoSendEnabled: cfg.autoSendEnabled, account: cfg.account } }); }
       return true;
     });

@@ -1,8 +1,7 @@
-// Cyan Panda Watcher — popup.js (v1.2.1)
-// v1.2.1: (1) ID + username TỰ NHẬN — Account ID lấy từ bản web đã đăng nhập (bridge ghi vào
-// pandaWatcherAccountId), username lấy từ trang TikTok đang mở (stats.account); ô nhập chỉ còn là
-// ghi đè thủ công khi tự nhận thất bại. (2) Mọi nút bấm đều hiện toast + cập nhật trạng thái,
-// để người bấm biết chắc nút đã được gọi (kể cả khi tab TikTok chưa nhận extension).
+// Cyan Panda Watcher — popup.js (v1.2.4)
+// v1.2.3: ghi chú nguồn identity — 'tab TikTok' = gói mạng passport, 'tab TikTok (DOM)' =
+// fallback nhận diện từ link avatar header khi gói mạng không về. Các tính năng v1.2.1 giữ
+// nguyên: ID + username tự nhận, mọi nút bấm đều hiện toast + cập nhật trạng thái.
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var toastTimer = null;
@@ -33,10 +32,11 @@
       $('inAccount').value = autoUser;
       $('inAccountId').value = autoId;
       // v1.2.2: identity tự nhận từ chính tab TikTok — hiện rõ nguồn, khỏi dòng "Chưa tự nhận được"
+      // v1.2.3: phân biệt nguồn — gói mạng passport = "từ tab TikTok", fallback DOM = "từ tab TikTok (DOM)"
       $('autoNote').textContent = autoId
         ? '✅ Account ID đã tự nhận từ bản web — không cần điền tay.'
         : (ident && ident.username
-          ? '✅ @' + ident.username + ' đã tự nhận từ tab TikTok — không cần đăng nhập web.'
+          ? '✅ @' + ident.username + ' đã tự nhận từ tab TikTok' + (ident.source === 'dom' ? ' (DOM)' : '') + ' — không cần đăng nhập web.'
           : 'Chưa tự nhận được tài khoản — mở 1 tab TikTok đã đăng nhập là Watcher tự nhận từ tab đó.');
       var age = st.at ? Math.round((Date.now() - st.at) / 1000) : null;
       if (st.at && age < 180) {
@@ -48,6 +48,9 @@
         $('stText').textContent = 'Chưa thấy Watcher chạy';
         $('stDetail').textContent = 'Mở 1 tab tiktok.com (đã đăng nhập) là Watcher tự khởi động.';
       }
+      // v1.2.4: dòng trạng thái danh sách — số hội thoại + số chưa rep (từ listScan)
+      if (st.listTotal !== undefined && st.listTotal !== null) $('stList').textContent = 'Danh sách: ' + st.listTotal + ' hội thoại (' + (st.listUnread || 0) + ' chưa rep)';
+      else $('stList').textContent = 'Danh sách: chưa quét';
     });
   }
 
