@@ -343,8 +343,8 @@
 
   /* ---------- v1.2.2: Quét DOM KHÔNG phụ thuộc tên class hash ---------- */
   // Tin nhắn chỉ lấy được từ DOM đã render (im-api trả protobuf rỗng, không có JSON tin nhắn).
-  // Neo theo ô soạn tin (placeholder chứa "Gửi tin nhắn") -> tìm khung hội thoại là container
-  // cuộn được chứa tin nhắn (không phải cột danh sách) -> duyệt các khối tin con:
+  // v1.2.7: neo theo khung bong bóng break-words (Business Suite, không có input placeholder)
+  // hoặc ô soạn (contenteditable / text placeholder) -> tìm khung hội thoại -> duyệt khối tin:
   // text = innerText đã bỏ dòng chỉ là giờ/ngày; hướng = vị trí ngang block so với giữa khung
   // (phải = mình gửi, trái = đối tác); timestamp = giờ/ngày gần nhất trong hàng chứa block;
   // đối tác = tiêu đề hội thoại (h2, không phải "Tin nhắn"), đối chiếu map profile
@@ -371,15 +371,41 @@
     }
     return out.join('\n').trim();
   }
-  function conversationTitle() {
+  function conversationTitle(pane) {
+    // v1.2.7: tiêu đề hội thoại có thể ở mọi tag (h1-h5, div tiêu đề), không chỉ h2.
+    // Ưu tiên tiêu đề nằm trong cột chat (gần khung chat); bỏ qua tiêu đề danh sách
+    // ("Tin nhắn...") và các tiêu đề nằm ngoài màn hình (drawer đóng, x < 0).
     try {
-      var heads = document.querySelectorAll('h2');
+      var paneLeft = -1;
+      try { if (pane && pane !== document.body) paneLeft = pane.getBoundingClientRect().left; } catch (e) {}
+      var heads = document.querySelectorAll('h1, h2, h3, h4, h5');
+      var fallback = '';
       for (var i = 0; i < heads.length; i++) {
         var t = (heads[i].innerText || '').trim();
         if (!t || t.length > 80) continue;
         if (normText(t).indexOf('tin nhan') === 0) continue;   // v1.2.5: tiêu đề kèm badge ("Tin nhắn 1857") cũng là tiêu đề danh sách, không phải tên hội thoại
-        return t;
+        var r = null;
+        try { r = heads[i].getBoundingClientRect(); } catch (e) {}
+        if (r && (r.width <= 0 || r.left < 0)) continue;   // ngoài màn hình (drawer đóng)
+        if (paneLeft >= 0 && r && r.left >= paneLeft - 60) return t;   // trong cột chat -> thắng ngay
+        if (!fallback) fallback = t;
       }
+      if (fallback) return fallback;
+      // Dự phòng: div tiêu đề kiểu Business Suite (text-H6-Bold) trong cột chat
+      var all = document.querySelectorAll('*');
+      var fb2 = '';
+      for (var j = 0; j < all.length; j++) {
+        if (all[j].tagName !== 'DIV' || !hasClass(all[j], 'text-H6-Bold')) continue;
+        var t2 = (all[j].innerText || '').trim();
+        if (!t2 || t2.length > 80) continue;
+        if (normText(t2).indexOf('tin nhan') === 0) continue;
+        var r2 = null;
+        try { r2 = all[j].getBoundingClientRect(); } catch (e) {}
+        if (r2 && (r2.width <= 0 || r2.left < 0)) continue;
+        if (paneLeft >= 0 && r2 && r2.left >= paneLeft - 60) return t2;
+        if (!fb2) fb2 = t2;
+      }
+      return fb2;
     } catch (e) {}
     return '';
   }
@@ -400,6 +426,72 @@
       // Fallback: textbox cuối cùng trong khung chat (khi placeholder đã bị thay bằng text đã nhập)
       var all = document.querySelectorAll('textarea, [contenteditable="true"]');
       if (all.length) return all[all.length - 1];
+    } catch (e) {}
+    return null;
+  }
+  // v1.2.7: chữ ký DOM thật đo từ tab của user (probe 25/10) — Business Suite KHÔNG có
+  // input[placeholder] nào nên neo ô soạn cũ không bao giờ khớp; bong bóng thật có chữ ký
+  // ổn định div.break-words.text-P4-Regular (class tiện ích, không phải class hash).
+  function hasClass(el, cls) {
+    try {
+      if (el.classList && el.classList.contains) return el.classList.contains(cls);
+      var cn = (typeof el.className === 'string') ? el.className : '';
+      return (' ' + cn + ' ').indexOf(' ' + cls + ' ') !== -1;
+    } catch (e) { return false; }
+  }
+  function isJunkNode(el) {
+    // v1.2.7: KHÔNG BAO GIỜ coi option/select/style/script (và mọi phần tử trong <select>)
+    // là khối tin nhắn — 56 phần tử <option> của dropdown chọn ngôn ngữ từng bị quét nhầm
+    // thành tin nhắn, đó chính là nguồn rác 'unknown' trước đây.
+    try {
+      var tag = (el.tagName || '').toUpperCase();
+      if (tag === 'OPTION' || tag === 'SELECT' || tag === 'STYLE' || tag === 'SCRIPT' || tag === 'LINK' || tag === 'NOSCRIPT') return true;
+      var n = el.parentElement;
+      while (n) { if ((n.tagName || '').toUpperCase() === 'SELECT') return true; n = n.parentElement; }
+    } catch (e) {}
+    return false;
+  }
+  function findBubbleFrame() {
+    // Khung chứa các bong bóng break-words: đi ngược từ bong bóng đầu tiên lên tới tổ tiên
+    // đầu tiên chứa ít nhất một nửa số bong bóng (khung danh sách tin thật, không phải
+    // wrapper của 1 tin). Trả null khi không có bong bóng nào (không mở hội thoại).
+    try {
+      var bubbles = [];
+      var all = document.querySelectorAll('*');
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].tagName === 'DIV' && hasClass(all[i], 'break-words') && hasClass(all[i], 'text-P4-Regular')) bubbles.push(all[i]);
+      }
+      if (!bubbles.length) return null;
+      var need = Math.ceil(bubbles.length / 2);
+      var n = bubbles[0].parentElement;
+      while (n && n !== document.body) {
+        var cnt = 0;
+        try {
+          var desc = n.querySelectorAll('*');
+          for (var j = 0; j < desc.length; j++) {
+            if (desc[j].tagName === 'DIV' && hasClass(desc[j], 'break-words') && hasClass(desc[j], 'text-P4-Regular')) cnt++;
+          }
+        } catch (e) {}
+        if (cnt >= need) return n;
+        n = n.parentElement;
+      }
+      return bubbles[0].parentElement || null;
+    } catch (e) { return null; }
+  }
+  function findComposerAnchor() {
+    // Neo ô soạn cho domScan (chỉ dùng để xác định khung, KHÔNG dùng để gửi tin):
+    // (1) findComposer() chuẩn; (2) bất kỳ phần tử contenteditable nào; (3) phần tử có
+    // text đúng bằng placeholder gửi tin (ô soạn Business Suite không phải input).
+    var c = findComposer();
+    if (c) return c;
+    try {
+      var eds = document.querySelectorAll('[contenteditable="true"]');
+      if (eds.length) return eds[eds.length - 1];
+      var all = document.querySelectorAll('div, span');
+      for (var i = 0; i < all.length; i++) {
+        var t = (all[i].innerText || '').trim();
+        if (t === 'Gửi tin nhắn...' || t === 'Gửi tin nhắn') return all[i];
+      }
     } catch (e) {}
     return null;
   }
@@ -535,13 +627,17 @@
     state.scanTotal = 0; state.scanBlocked = 0; state.lastScanAllBlocked = false;
     detectDomIdentity();
     try {
-      var composer = findComposer();
-      // v1.2.5: KHÔNG có ô soạn (không mở hội thoại nào) thì trả về 0, KHÔNG đoán khung
-      // chat — đoán khung khi không có hội thoại mở là nguồn sinh khối rác ở v1.2.4.
-      // Chỉ dùng fallback (b)/(c) khi đã có ô soạn mà xác định khung thất bại.
-      if (!composer) return;
-      var pane = findMessagePane(composer);
-      if (!pane) pane = findChatPaneFallback();
+      // v1.2.7: Business Suite KHÔNG có input[placeholder] nên neo ô soạn cũ không bao giờ
+      // khớp — neo mới theo thứ tự: (1) khung chứa bong bóng break-words (khung chat thật);
+      // (2) ô soạn (findComposerAnchor: contenteditable / text placeholder). Chỉ trả về 0
+      // khi CẢ HAI neo đều không có (không mở hội thoại nào) — luật no-composer của v1.2.5
+      // giữ nguyên ý (không đoán khung khi không có hội thoại) nhưng sửa nguyên nhân sai.
+      var composer = findComposerAnchor();
+      var bubbleFrame = findBubbleFrame();
+      if (!composer && !bubbleFrame) return;
+      var pane = null;
+      if (bubbleFrame) pane = bubbleFrame;
+      else { pane = findMessagePane(composer); if (!pane) pane = findChatPaneFallback(); }
       var listCol = null, pr = null, midX = 0;
       if (pane) {
         pr = pane.getBoundingClientRect();
@@ -559,7 +655,7 @@
         midX = leftEdge + effWidth / 2;
         pane = document.body;
       }
-      var title = conversationTitle();
+      var title = conversationTitle(pane);
       var partnerUser = (title && state.profileByName[CORE.normName(title)]) || '';
       // Nhánh chứa ô soạn trong pane (để loại khỏi vùng quét khi pane là cột chat rộng)
       // v1.2.5: CHỈ tính nhánh khi pane là khung chat thật. Khi pane = document.body
@@ -578,6 +674,7 @@
       var nodes = pane.querySelectorAll('*');
       for (var i = 0; i < nodes.length; i++) {
         var el = nodes[i];
+        if (isJunkNode(el)) continue;   // v1.2.7: option/select/style/script không bao giờ là tin nhắn
         if (composerBranch) {
           var p = el, insideComposer = false;
           while (p && p !== pane) { if (p === composerBranch) { insideComposer = true; break; } p = p.parentElement; }
@@ -671,6 +768,7 @@
     try { nodes = col.querySelectorAll('*'); } catch (e) { return out; }
     for (var i = 0; i < nodes.length; i++) {
       var el = nodes[i];
+      if (isJunkNode(el)) continue;   // v1.2.7: option/select/style/script không bao giờ là dòng hội thoại
       var raw = (el.innerText || '').trim();
       if (!raw) continue;
       var dup = false;
@@ -704,23 +802,64 @@
     }
     return out;
   }
+  // v1.2.7: đường danh sách cho trang /messages — chữ ký data-e2e ỔN ĐỊNH đo từ probe
+  // thật (không phụ thuộc class hash): dòng = [data-e2e=dm-new-conversation-item],
+  // tên = [data-e2e=dm-new-conversation-nickname] trong dòng, chưa đọc =
+  // [data-e2e=dm-new-conversation-unread] trong dòng. Chạy TRƯỚC đường generic cũ.
+  function extractDmRows() {
+    var out = [], seen = new Set();
+    try {
+      var items = document.querySelectorAll('[data-e2e="dm-new-conversation-item"]');
+      for (var i = 0; i < items.length; i++) {
+        var el = items[i];
+        if (isJunkNode(el)) continue;
+        var nameEl = null;
+        try { nameEl = el.querySelector('[data-e2e="dm-new-conversation-nickname"]'); } catch (e) {}
+        var name = nameEl ? (nameEl.innerText || '').trim() : '';
+        if (!name || name.length > 60) continue;
+        var raw = (el.innerText || '').trim();
+        if (!raw) continue;
+        var lines = raw.split('\n').map(function (s) { return s.trim(); }).filter(function (s) { return !!s; });
+        var tl = timeLineOf(lines);
+        var preview = '';
+        for (var j = 0; j < lines.length; j++) {
+          if (lines[j] === name) continue;
+          if (tl && j === tl.idx) continue;
+          if (/^\d{1,3}$/.test(lines[j])) continue;   // badge số chưa đọc, không phải preview
+          preview = lines[j]; break;
+        }
+        var unread = null, dir = null;
+        try { if (el.querySelector('[data-e2e="dm-new-conversation-unread"]')) { unread = true; dir = 'in'; } } catch (e) {}
+        if (!dir && /^(Bạn|You)\s*:/.test(preview)) dir = 'out';
+        var key = name + '|' + preview + '|' + (tl ? tl.time : '');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ name: name, preview: preview, time: tl ? tl.time : '', unread: unread, direction: dir });
+      }
+    } catch (e) {}
+    return out;
+  }
   function listScan() {
     if (!cfg.captureEnabled || location.pathname.indexOf('/messages') === -1) return;
     try {
       // v1.2.5: LUÔN set listStats kể cả khi không tìm được cột hoặc 0 dòng, kèm reason
       // để popup phân biệt được "chưa quét" / "chưa tìm thấy cột" / "0 hội thoại".
+      // v1.2.7: thử đường data-e2e trước; chỉ khi không có dòng nào mới dùng đường generic cũ.
       var now = new Date().toISOString();
-      var col = findListColumn();
-      if (!col) {
-        state.listStats = { total: 0, unread: 0, reason: 'no-column', at: now };
-        saveStats(); renderChip();
-        return;
-      }
-      var rows = extractListRows(col);
+      var rows = extractDmRows();
       if (!rows.length) {
-        state.listStats = { total: 0, unread: 0, reason: 'no-rows', at: now };
-        saveStats(); renderChip();
-        return;
+        var col = findListColumn();
+        if (!col) {
+          state.listStats = { total: 0, unread: 0, reason: 'no-column', at: now };
+          saveStats(); renderChip();
+          return;
+        }
+        rows = extractListRows(col);
+        if (!rows.length) {
+          state.listStats = { total: 0, unread: 0, reason: 'no-rows', at: now };
+          saveStats(); renderChip();
+          return;
+        }
       }
       var acctKey = cfg.accountId || (state.identity && state.identity.username) || state.account || '';
       var upserts = rows.map(function (r) {
@@ -761,7 +900,7 @@
   function heartbeat() {
     detectDomIdentity();
     state.account = guessAccount();
-    var value = { account: state.account, accountId: cfg.accountId || '', identitySource: state.identity ? (state.identity.source || 'tab') : '', url: location.href, at: new Date().toISOString(), version: '1.2.6', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError, blockedUnknown: state.blockedUnknown };
+    var value = { account: state.account, accountId: cfg.accountId || '', identitySource: state.identity ? (state.identity.source || 'tab') : '', url: location.href, at: new Date().toISOString(), version: '1.2.7', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError, blockedUnknown: state.blockedUnknown };
     supa('app_state?on_conflict=key', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: { key: 'watcher_status', value: value, updated_at: new Date().toISOString() } }).catch(function () {});
     saveStats();
   }
