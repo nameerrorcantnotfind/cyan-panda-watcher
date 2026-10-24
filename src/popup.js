@@ -8,6 +8,7 @@
       $('ckCapture').checked = cfg.captureEnabled !== false;
       $('ckAuto').checked = !!cfg.autoSendEnabled;
       $('inAccount').value = cfg.account || '';
+      $('inAccountId').value = cfg.accountId || '';
       var st = o.pandaWatcherStats || {};
       var age = st.at ? Math.round((Date.now() - st.at) / 1000) : null;
       if (st.at && age < 180) {
@@ -28,6 +29,7 @@
       cfg.captureEnabled = $('ckCapture').checked;
       cfg.autoSendEnabled = $('ckAuto').checked;
       cfg.account = $('inAccount').value.trim().replace(/^@/, '');
+      cfg.accountId = $('inAccountId').value.trim();
       chrome.storage.local.set({ pandaWatcherCfg: cfg }, function () {
         $('btnSave').textContent = 'Đã lưu ✓ (tải lại tab TikTok để áp dụng)';
         setTimeout(load, 600);
@@ -44,6 +46,14 @@
 
   $('btnTool').addEventListener('click', function () {
     chrome.tabs.create({ url: 'https://nameerrorcantnotfind.github.io/cyan-pandatool/' });
+  });
+
+  $('btnSuite').addEventListener('click', function () {
+    chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
+      var t = tabs && tabs[0];
+      if (t && t.url && t.url.indexOf('tiktok.com') !== -1) chrome.tabs.update(t.id, { url: 'https://www.tiktok.com/business-suite/messages' });
+      else chrome.tabs.create({ url: 'https://www.tiktok.com/business-suite/messages' });
+    });
   });
 
   load();

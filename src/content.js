@@ -2,6 +2,9 @@
 // Vai trò: (1) nhận data TikTok tự trả về từ hook.js -> chuẩn hoá -> chống trùng -> đẩy Supabase
 //         (2) quét DOM trang Tin nhắn (tầng dự phòng) (3) heartbeat để tool web thấy Watcher còn sống
 //         (4) thực thi lệnh gửi trong bảng queue khi chủ tài khoản BẬT chế độ tự gửi (mặc định TẮT)
+//         (5) v1.1: nhà là Business Suite messages — mọi thao tác (quét/gửi/mở) đều diễn ra ở đó;
+//             tìm hội thoại bằng cả tên hiển thị + @username (không dấu), có cuộn tải thêm + search dự phòng;
+//             nhận lệnh mở hội thoại từ tool web qua app_state watcher_open.
 // Mọi thao tác gửi đều: claim lệnh trước -> mở hội thoại bằng CLICK nội trang -> điền thẳng ô chat
 // (không dùng clipboard của máy) -> gửi -> thấy bong bóng tin mới ghi 'sent', không thấy là 'failed'.
 (function () {
@@ -46,6 +49,87 @@
     return state.account || '';
   }
 
+  /* ---------- v1.1: Business Suite home + tim hoi thoai (ten hien thi + @username, khong dau) ---------- */
+  var BS_HOME = 'https://www.tiktok.com/business-suite/messages';
+  function isMessagesPage() { return location.pathname.indexOf('/messages') !== -1; }
+  function normText(s) {
+    return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'D').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+  function rowCandidates() {
+    var list = [];
+    var seen = new Set();
+    var sels = ['[data-e2e="chat-list-item"]', '[class*="ChatListItem"]', '[class*="ConversationItem"]', 'a[href*="/messages"]'];
+    sels.forEach(function (sel) {
+      try { document.querySelectorAll(sel).forEach(function (el) { if (!seen.has(el)) { seen.add(el); list.push(el); } }); } catch (e) {}
+    });
+    return list;
+  }
+  function rowMatches(el, names) {
+    var t = normText(el.innerText || '');
+    if (!t) return false;
+    for (var i = 0; i < names.length; i++) { var n = names[i]; if (n && t.indexOf(n) !== -1) return true; }
+    return false;
+  }
+  function findConversationEl(username, displayName) {
+    var names = [];
+    if (displayName) names.push(normText(displayName));
+    if (username) { names.push(normText(username)); names.push(normText(String(username).replace(/^@/, ''))); }
+    var items = rowCandidates();
+    for (var i = 0; i < items.length; i++) { if (rowMatches(items[i], names)) return items[i]; }
+    // Fallback: khoi chua ten trong cot Tin nhan (khi class hash doi, selector cu khong trung)
+    var heads = Array.prototype.slice.call(document.querySelectorAll('h2'));
+    for (var h = 0; h < heads.length; h++) {
+      if (normText(heads[h].innerText) !== 'tin nhan') continue;
+      var col = heads[h].parentElement;
+      if (!col) continue;
+      var divs = col.querySelectorAll('div');
+      for (var d = 0; d < divs.length; d++) {
+        var dt = normText(divs[d].innerText || '');
+        if (dt && names.some(function (n) { return n && dt.indexOf(n) === 0; })) return divs[d];
+      }
+    }
+    return null;
+  }
+  function findScrollContainer() {
+    var items = rowCandidates();
+    var el = items.length ? items[0] : null;
+    while (el && el !== document.body) {
+      if (el.scrollHeight > el.clientHeight + 20) return el;
+      el = el.parentElement;
+    }
+    return document.scrollingElement || document.documentElement;
+  }
+  async function scrollListToFind(username, displayName) {
+    var el = findConversationEl(username, displayName);
+    if (el) return el;
+    var box = findScrollContainer();
+    for (var step = 0; step < 10 && !el; step++) {
+      try { box.scrollTop = box.scrollTop + 900; } catch (e) {}
+      await sleep(900);
+      el = findConversationEl(username, displayName);
+    }
+    if (el) return el;
+    // Cuoi cung: o Tim kiem chung cua trang (chua xac minh co loc hoi thoai khong — chi thu, khong bao dam)
+    try {
+      var sb = document.querySelector('input[role="searchbox"], input[placeholder*="Tìm kiếm"], input[aria-label*="Tìm kiếm"]');
+      var q = displayName || username || '';
+      if (sb && q) {
+        sb.focus();
+        document.execCommand('selectAll', false, null);
+        document.execCommand('insertText', false, q);
+        sb.dispatchEvent(new InputEvent('input', { bubbles: true, data: q }));
+        await sleep(2000);
+        el = findConversationEl(username, displayName);
+      }
+    } catch (e) {}
+    return el;
+  }
+  async function goBusinessSuite() {
+    if (isMessagesPage()) return;
+    location.href = BS_HOME;
+    await sleep(4500);
+  }
+
   /* ---------- Nhận data từ hook (page world) ---------- */
   window.addEventListener('message', function (ev) {
     if (ev.origin !== location.origin || !ev.data || ev.data.__panda !== 'capture') return;
@@ -80,6 +164,7 @@
       if (res.ok && Array.isArray(res.json)) res.json.forEach(function (r) { existing[r.dedupe_key] = 1; });
       var fresh = rows.filter(function (r) { return !existing[r.dedupe_key]; });
       if (!fresh.length) { state.lastSync = new Date().toISOString(); saveStats(); return; }
+      if (cfg.accountId) fresh.forEach(function (r) { r.account_id = cfg.accountId; });
       return supa('messages', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: fresh }).then(function (r2) {
         if (r2.ok) {
           state.lastPush = fresh.length;
@@ -145,7 +230,7 @@
   /* ---------- Heartbeat ---------- */
   function heartbeat() {
     state.account = guessAccount();
-    var value = { account: state.account, url: location.href, at: new Date().toISOString(), version: '1.0.0', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError };
+    var value = { account: state.account, accountId: cfg.accountId || '', url: location.href, at: new Date().toISOString(), version: '1.1.0', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError };
     supa('app_state?on_conflict=key', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: { key: 'watcher_status', value: value, updated_at: new Date().toISOString() } }).catch(function () {});
     saveStats();
   }
@@ -155,14 +240,6 @@
 
   /* ---------- Thực thi hàng đợi gửi (chỉ khi BẬT tự gửi) ---------- */
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-
-  function findConversationEl(name) {
-    var items = document.querySelectorAll('[data-e2e="chat-list-item"], [class*="ChatListItem"], [class*="ConversationItem"], a[href*="/messages"]');
-    for (var i = 0; i < items.length; i++) {
-      if ((items[i].innerText || '').toLowerCase().indexOf(String(name || '').toLowerCase()) !== -1) return items[i];
-    }
-    return null;
-  }
 
   function setComposerText(el, text) {
     el.focus();
@@ -179,9 +256,9 @@
 
   async function executeJob(job) {
     var target = job.fan_username;
-    if (location.pathname.indexOf('/messages') === -1) { location.href = 'https://www.tiktok.com/messages'; await sleep(4000); }
-    var el = findConversationEl(target);
-    if (!el) throw new Error('Không tìm thấy hội thoại của ' + target + ' trong danh sách');
+    await goBusinessSuite();
+    var el = await scrollListToFind(target, '');
+    if (!el) throw new Error('Không tìm thấy hội thoại của ' + target + ' trong danh sách (đã cuộn + thử search)');
     el.click();
     await sleep(2500);
     if (detectCaptcha()) throw new Error('CAPTCHA đang hiện — dừng gửi');
@@ -203,7 +280,8 @@
 
   function pollQueue() {
     if (!cfg.autoSendEnabled || state.queueBusy || state.captcha) return;
-    supa('queue?select=*&status=eq.approved&order=created_at.asc&limit=1').then(async function (res) {
+    var aq = cfg.accountId ? '&account_id=eq.' + encodeURIComponent(cfg.accountId) : '&account_id=is.null';
+    supa('queue?select=*&status=eq.approved' + aq + '&order=created_at.asc&limit=1').then(async function (res) {
       if (!res.ok || !Array.isArray(res.json) || !res.json.length) return;
       var job = res.json[0];
       state.queueBusy = true;
@@ -221,6 +299,29 @@
       }
       state.queueBusy = false;
       saveStats(); renderChip();
+    }).catch(function () {});
+  }
+
+  /* ---------- v1.1: lenh mo hoi thoai tu tool web (app_state watcher_open) ---------- */
+  var lastOpenAt = 0;
+  function pollOpenCommand() {
+    if (state.queueBusy) return;
+    supa('app_state?select=value&key=eq.watcher_open').then(async function (res) {
+      var v = res.ok && Array.isArray(res.json) && res.json[0] ? res.json[0].value : null;
+      if (!v || !v.at) return;
+      var at = Date.parse(v.at) || 0;
+      if (!at || at <= lastOpenAt || Date.now() - at > 120000) return;
+      lastOpenAt = at;
+      state.queueBusy = true;
+      try {
+        await goBusinessSuite();
+        var el = await scrollListToFind(v.username, v.displayName);
+        if (!el) { logBE('WATCHER_OPEN_FAIL', 'Tool yêu cầu mở @' + (v.username || '') + ' nhưng không tìm thấy hội thoại', 'WATCHER_005'); }
+        else { el.click(); await sleep(1500); logBE('WATCHER_OPEN', 'Đã mở hội thoại @' + (v.username || '') + ' theo lệnh từ tool web', 'WATCHER_005'); }
+        var nv = Object.assign({}, v, { handled: true, handledAt: new Date().toISOString() });
+        supa('app_state?on_conflict=key', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: { key: 'watcher_open', value: nv, updated_at: new Date().toISOString() } }).catch(function () {});
+      } catch (e) { logBE('WATCHER_OPEN_FAIL', 'Lệnh mở từ tool lỗi: ' + e.message, 'WATCHER_005'); }
+      state.queueBusy = false;
     }).catch(function () {});
   }
 
@@ -262,6 +363,7 @@
     setInterval(domScan, (cfg.domScanSec || 20) * 1000);
     setInterval(heartbeat, (cfg.heartbeatSec || 60) * 1000);
     setInterval(function () { detectCaptcha(); pollQueue(); }, (cfg.queuePollSec || 8) * 1000);
+    setInterval(pollOpenCommand, (cfg.openPollSec || 10) * 1000);
     setTimeout(function () { domScan(); heartbeat(); }, 3000);
     logBE('WATCHER_START', 'Watcher khởi động trên tab TikTok (account: ' + (guessAccount() || 'chưa rõ') + ')', 'WATCHER_000');
   });

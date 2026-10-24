@@ -16,7 +16,7 @@
 </style>
 </head>
 <body>
-  <h1>🐼 Cyan Panda Watcher <span class="muted">v1.0.0</span></h1>
+  <h1>🐼 Cyan Panda Watcher <span class="muted">v1.1.0</span></h1>
   <div class="muted">Cầu nối giữa TikTok web và Cyan Panda Tool (qua Supabase).</div>
 
   <div class="card">
@@ -26,6 +26,9 @@
       <button id="btnScan">🔄 Quét ngay</button>
       <button class="ghost" id="btnTool">Mở Cyan Panda Tool</button>
     </div>
+    <div class="row" style="margin-top:8px">
+      <button id="btnSuite">🏢 Mở Business Suite Messages</button>
+    </div>
   </div>
 
   <div class="card">
@@ -33,6 +36,8 @@
     <div class="row"><label>Chế độ treo: tự rep tin đã duyệt/tin thường</label><input type="checkbox" id="ckAuto"></div>
     <div style="margin-top:8px"><label>@username TikTok của tab này</label>
       <input type="text" id="inAccount" placeholder="vd: cyan.khotinh (để trống = tự đoán)"></div>
+    <div style="margin-top:8px"><label>Account ID (open_id) — copy từ tool web, tab Kết Nối</label>
+      <input type="text" id="inAccountId" placeholder="vd: 1234567890 (để trống = chỉ gửi lệnh cũ chưa gắn acc)"></div>
     <div class="row" style="margin-top:10px"><span class="muted">Thay đổi có hiệu lực ngay, không cần tải lại trang.</span><button id="btnSave">Lưu</button></div>
   </div>
 

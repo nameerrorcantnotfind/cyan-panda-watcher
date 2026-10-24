@@ -6,8 +6,10 @@ window.PANDA_WATCHER_DEFAULTS = {
   captureEnabled: true,   // quét data từ TikTok web -> Supabase
   autoSendEnabled: false, // chế độ treo tự rep — MẶC ĐỊNH TẮT, chủ tài khoản tự bật trong popup
   account: '',            // @username TikTok của tab này (điền trong popup; để trống thì tự đoán từ trang)
+  accountId: '',          // v1.0.1: open_id của acc TikTok (copy từ tool web, tab Kết Nối) — data Watcher đẩy lên BE sẽ gắn account_id này; hàng đợi cũng chỉ lấy lệnh của acc này (để trống = chỉ lấy lệnh cũ chưa gắn acc)
   heartbeatSec: 60,
   queuePollSec: 8,
+  openPollSec: 10,   // v1.1: moi 10s kiem tra lenh mo hoi thoai tu tool web (app_state watcher_open)
   domScanSec: 20,
   source: 'watcher'
 };
