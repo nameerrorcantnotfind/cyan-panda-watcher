@@ -1,4 +1,4 @@
-// Cyan Panda Watcher — popup.js (v1.2.7)
+// Cyan Panda Watcher — popup.js (v1.2.9)
 // v1.2.3: ghi chú nguồn identity — 'tab TikTok' = gói mạng passport, 'tab TikTok (DOM)' =
 // fallback nhận diện từ link avatar header khi gói mạng không về. Các tính năng v1.2.1 giữ
 // nguyên: ID + username tự nhận, mọi nút bấm đều hiện toast + cập nhật trạng thái.
@@ -33,10 +33,13 @@
       $('inAccountId').value = autoId;
       // v1.2.2: identity tự nhận từ chính tab TikTok — hiện rõ nguồn, khỏi dòng "Chưa tự nhận được"
       // v1.2.3: phân biệt nguồn — gói mạng passport = "từ tab TikTok", fallback DOM = "từ tab TikTok (DOM)"
+      // v1.2.8: nguồn profile = tự đi qua trang hồ sơ lấy username từ URL khi khởi động
       $('autoNote').textContent = autoId
         ? '✅ Account ID đã tự nhận từ bản web — không cần điền tay.'
         : (ident && ident.username
-          ? '✅ @' + ident.username + ' đã tự nhận từ tab TikTok' + (ident.source === 'dom' ? ' (DOM)' : '') + ' — không cần đăng nhập web.'
+          ? (ident.source === 'profile'
+            ? '✅ @' + ident.username + ' đã tự nhận (từ trang hồ sơ) — không cần đăng nhập web.'
+            : '✅ @' + ident.username + ' đã tự nhận từ tab TikTok' + (ident.source === 'dom' ? ' (DOM)' : '') + ' — không cần đăng nhập web.')
           : 'Chưa tự nhận được tài khoản — mở 1 tab TikTok đã đăng nhập là Watcher tự nhận từ tab đó.');
       var age = st.at ? Math.round((Date.now() - st.at) / 1000) : null;
       if (st.at && age < 180) {
@@ -56,6 +59,11 @@
         else $('stList').textContent = 'Danh sách: ' + st.listTotal + ' hội thoại (' + (st.listUnread || 0) + ' chưa rep)';
       }
       else $('stList').textContent = 'Danh sách: chưa quét';
+      // v1.2.9: dòng chẩn đoán quét danh sách — chỉ số lượng, không tên/nội dung.
+      if (st.lastListDiag && st.lastListDiag.dmItemCount !== undefined) {
+        $('stDiag').textContent = 'Chẩn đoán: trang có ' + st.lastListDiag.dmItemCount + ' dòng, tách được ' + (st.lastListDiag.rowsOut || 0) + ' dòng';
+      }
+      else $('stDiag').textContent = 'Chẩn đoán: chưa có dữ liệu';
       // v1.2.6: dòng trạng thái chặn — số tin không rõ người gửi đã bị chặn thay vì lưu 'unknown'
       if (st.blockedUnknown !== undefined && st.blockedUnknown !== null) {
         $('stBlocked').textContent = 'Đã chặn: ' + st.blockedUnknown + ' tin không rõ người gửi';
@@ -80,12 +88,23 @@
   });
 
   $('btnScan').addEventListener('click', function () {
-    chrome.tabs.query({ url: 'https://www.tiktok.com/*' }, function (tabs) {
-      if (!tabs || !tabs.length) { showToast('Chưa có tab TikTok nào đang mở.'); return; }
-      chrome.tabs.sendMessage(tabs[0].id, { type: 'PANDA_SCAN_NOW' }, function (res) {
+    // v1.2.9: QUÉT ĐÚNG TAB ĐANG MỞ — trước đây gửi cho tabs[0] trong toàn bộ tab
+    // tiktok.com (thường là tab Business Suite mở trước) nên bấm Quét ngay lúc đang
+    // xem /messages vẫn quét nhầm tab Business Suite và báo 0. Giờ ưu tiên tab đang
+    // mở nếu là tab TikTok, chỉ khi tab đang mở không phải TikTok mới dùng tab TikTok đầu tiên.
+    var doScan = function (tabId) {
+      chrome.tabs.sendMessage(tabId, { type: 'PANDA_SCAN_NOW' }, function (res) {
         if (chrome.runtime.lastError) { showToast('Tab TikTok chưa nhận extension — tải lại trang TikTok rồi quét lại.'); return; }
         showToast('Đã gọi quét ✓ — tổng đã đẩy trong phiên này: ' + ((res && res.pushedTotal) || 0) + ' tin.');
         setTimeout(load, 1500);
+      });
+    };
+    chrome.tabs.query({ active: true, currentWindow: true }, function (active) {
+      var t = active && active[0];
+      if (t && t.url && t.url.indexOf('tiktok.com') !== -1) { doScan(t.id); return; }
+      chrome.tabs.query({ url: 'https://www.tiktok.com/*' }, function (tabs) {
+        if (!tabs || !tabs.length) { showToast('Chưa có tab TikTok nào đang mở.'); return; }
+        doScan(tabs[0].id);
       });
     });
   });

@@ -14,7 +14,7 @@
   if (!CORE) return;
 
   var cfg = Object.assign({}, D);
-  var state = { account: '', identity: null, profileById: {}, profileByName: {}, domSeen: {}, startedAt: Date.now(), lastSync: null, lastPush: 0, pushedTotal: 0, capturedTotal: 0, captcha: false, lastError: '', queueBusy: false, listStats: null, blockedUnknown: 0, scanTotal: 0, scanBlocked: 0, lastScanAllBlocked: false, lastBlockReason: '', lastLoggedBlocked: -1 };
+  var state = { account: '', identity: null, profileById: {}, profileByName: {}, domSeen: {}, startedAt: Date.now(), lastSync: null, lastPush: 0, pushedTotal: 0, capturedTotal: 0, captcha: false, lastError: '', queueBusy: false, listStats: null, blockedUnknown: 0, scanTotal: 0, scanBlocked: 0, lastScanAllBlocked: false, lastBlockReason: '', lastLoggedBlocked: -1, lastListDiag: null };
   var pushedKeys = new Set();
   var buffer = [];
   var flushTimer = null;
@@ -657,6 +657,7 @@
       }
       var title = conversationTitle(pane);
       var partnerUser = (title && state.profileByName[CORE.normName(title)]) || '';
+      var lastBubbleDir = '', lastBubbleTxt = '';   // v1.2.8: bong bóng CUỐI (theo thứ tự DOM) quyết direction cho bảng conversations
       // Nhánh chứa ô soạn trong pane (để loại khỏi vùng quét khi pane là cột chat rộng)
       // v1.2.5: CHỈ tính nhánh khi pane là khung chat thật. Khi pane = document.body
       // (fallback (c)), nhánh đi ngược tới con trực tiếp của body sẽ là CẢ cột chat
@@ -710,6 +711,25 @@
           else { at = new Date(); state.domSeen[sig] = at.toISOString(); }
         }
         enqueue({ account: guessAccount(), counterpartName: title, counterpartUsername: partnerUser, direction: dir, content: txt, at: at, via: 'dom' });
+        lastBubbleDir = dir; lastBubbleTxt = txt;   // khối sau ghi đè khối trước -> cuối vòng lặp còn lại đúng bong bóng cuối
+      }
+      // v1.2.8: hội thoại đang mở cũng ghi vào bảng conversations — direction PHẢI là chiều
+      // của BONG BÓNG CUỐI CÙNG, không phải bong bóng đầu hay bất kỳ bong bóng nào khác.
+      // Hội thoại đang mở coi như đã đọc (unread false); chưa rep hay không chỉ còn do
+      // direction: 'in' = fan nhắn cuối (chưa rep), 'out' = mình nhắn cuối (đã rep).
+      // last_at để trống: giờ hiển thị sẽ do listScan điền khi danh sách hiện ra.
+      if (title && lastBubbleDir) {
+        var acctKey2 = cfg.accountId || (state.identity && state.identity.username) || state.account || '';
+        supa('conversations?on_conflict=account_id,counterpart', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: [{
+          account_id: acctKey2,
+          counterpart: title,
+          counterpart_username: partnerUser || null,
+          last_preview: lastBubbleTxt,
+          last_at: '',
+          unread: false,
+          direction: lastBubbleDir,
+          updated_at: new Date().toISOString()
+        }] }).catch(function () {});
       }
       state.account = guessAccount();
     } catch (e) {}
@@ -729,11 +749,17 @@
   /* ---------- v1.2.4: Quét DANH SÁCH hội thoại (không cần mở hội thoại) ---------- */
   // User yêu cầu: ở màn hình danh sách cũng phải bắt được — ít nhất phân biệt được
   // ai nhắn mà chưa rep. Mỗi dòng lấy: tên hiển thị (dòng đầu), preview tin cuối (dòng hai),
-  // thời gian (dòng khớp mẫu giờ/ngày, thường ở phía phải). Cờ chưa đọc CHỈ khi có dấu
-  // hiệu rõ (chữ đậm / thẻ B-STRONG / aria-label "chưa đọc"/"unread" / chấm chưa đọc) —
-  // best-effort, không có dấu hiệu thì null, KHÔNG đoán. Hướng: 'in' nếu có cờ chưa đọc
-  // (đó chính là "chưa rep"); 'out' nếu preview có tiền tố "Bạn:"/"You:"; còn lại null.
-  // TUYỆT ĐỐI không đoán hướng khi không có bằng chứng.
+  // thời gian (dòng khớp mẫu giờ/ngày, thường ở phía phải).
+  // v1.2.8 — LUẬT "CHƯA REP" (user chốt, sửa sai luật cũ): hội thoại là CHƯA REP khi và
+  // chỉ khi TIN CUỐI LÀ CỦA FAN (chiều 'in'), bất kể đã đọc hay chưa đọc. Tin cuối là
+  // của mình (preview có tiền tố "Bạn:"/"You:") thì là ĐÃ REP — tuyệt đối không ghi nhầm
+  // thành fan đang chờ. Dấu chưa đọc chỉ quyết unread true/false, KHÔNG quyết direction.
+  // Luật cũ (không dấu hiệu -> direction null) là SAI: không dấu vẫn là 'in' nếu không
+  // có tiền tố (tin đã đọc mà chủ tài khoản chưa rep vẫn là chưa rep).
+  function lastMsgDirection(preview, hasUnreadSignal) {
+    if (/^(Bạn|You)\s*:/.test(preview || '')) return { direction: 'out', unread: false };
+    return { direction: 'in', unread: !!hasUnreadSignal };
+  }
   function timeLineOf(lines) {
     for (var i = lines.length - 1; i >= 0; i--) {
       if (/\d{1,2}:\d{2}/.test(lines[i]) || /\d{1,2}\/\d{1,2}(\/\d{4})?/.test(lines[i])) return { time: lines[i], idx: i };
@@ -792,9 +818,8 @@
       if (!tl) continue;   // dòng hội thoại thật luôn có thời gian
       var preview = lines.length > 1 ? lines[1] : '';
       if (preview === tl.time) preview = '';
-      var unread = null, dir = null;
-      if (subtreeHasUnreadSignal(el)) { unread = true; dir = 'in'; }
-      else if (/^(Bạn|You)\s*:/.test(preview)) { dir = 'out'; }
+      var dd = lastMsgDirection(preview, subtreeHasUnreadSignal(el));   // v1.2.8: luật chưa rep theo tin cuối
+      var unread = dd.unread, dir = dd.direction;
       var key = name + '|' + preview + '|' + tl.time;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -807,18 +832,26 @@
   // tên = [data-e2e=dm-new-conversation-nickname] trong dòng, chưa đọc =
   // [data-e2e=dm-new-conversation-unread] trong dòng. Chạy TRƯỚC đường generic cũ.
   function extractDmRows() {
+    // v1.2.9: try/catch THEO TỪNG DÒNG (1 dòng lỗi không giết cả danh sách như
+    // try/catch ngoài trước đây) + đếm số dòng bị từng bộ lọc loại, chỉ gồm số lượng
+    // (không tên, không xem trước, không nội dung) để chẩn đoán vụ quét 0 dòng.
     var out = [], seen = new Set();
-    try {
-      var items = document.querySelectorAll('[data-e2e="dm-new-conversation-item"]');
-      for (var i = 0; i < items.length; i++) {
+    var diag = { dmItemCount: 0, nickCount: 0, dropJunk: 0, dropNoName: 0, dropNameLong: 0, dropNoText: 0, dropDup: 0, dropError: 0, e2eConversationCount: -1, e2eDmCount: -1 };
+    try { diag.dmItemCount = document.querySelectorAll('[data-e2e="dm-new-conversation-item"]').length; } catch (e) {}
+    try { diag.nickCount = document.querySelectorAll('[data-e2e="dm-new-conversation-nickname"]').length; } catch (e) {}
+    var items = [];
+    try { items = document.querySelectorAll('[data-e2e="dm-new-conversation-item"]'); } catch (e) {}
+    for (var i = 0; i < items.length; i++) {
+      try {
         var el = items[i];
-        if (isJunkNode(el)) continue;
+        if (isJunkNode(el)) { diag.dropJunk++; continue; }
         var nameEl = null;
         try { nameEl = el.querySelector('[data-e2e="dm-new-conversation-nickname"]'); } catch (e) {}
         var name = nameEl ? (nameEl.innerText || '').trim() : '';
-        if (!name || name.length > 60) continue;
+        if (!name) { diag.dropNoName++; continue; }
+        if (name.length > 60) { diag.dropNameLong++; continue; }
         var raw = (el.innerText || '').trim();
-        if (!raw) continue;
+        if (!raw) { diag.dropNoText++; continue; }
         var lines = raw.split('\n').map(function (s) { return s.trim(); }).filter(function (s) { return !!s; });
         var tl = timeLineOf(lines);
         var preview = '';
@@ -828,39 +861,87 @@
           if (/^\d{1,3}$/.test(lines[j])) continue;   // badge số chưa đọc, không phải preview
           preview = lines[j]; break;
         }
-        var unread = null, dir = null;
-        try { if (el.querySelector('[data-e2e="dm-new-conversation-unread"]')) { unread = true; dir = 'in'; } } catch (e) {}
-        if (!dir && /^(Bạn|You)\s*:/.test(preview)) dir = 'out';
+        var hasUnread = false;
+        try { hasUnread = !!el.querySelector('[data-e2e="dm-new-conversation-unread"]'); } catch (e) {}
+        var dd = lastMsgDirection(preview, hasUnread);   // v1.2.8: luật chưa rep theo tin cuối
+        var unread = dd.unread, dir = dd.direction;
         var key = name + '|' + preview + '|' + (tl ? tl.time : '');
-        if (seen.has(key)) continue;
+        if (seen.has(key)) { diag.dropDup++; continue; }
         seen.add(key);
         out.push({ name: name, preview: preview, time: tl ? tl.time : '', unread: unread, direction: dir });
-      }
-    } catch (e) {}
-    return out;
+      } catch (e) { diag.dropError++; }
+    }
+    // v1.2.9 (theo dõi sau đợt TikTok update): chỉ khi không thấy dòng dm nào mới
+    // quét thêm 2 số đếm gợi ý đổi tên chữ ký — nếu dmItemCount = 0 mà vẫn có nhiều
+    // phần tử data-e2e chứa 'conversation'/'dm-' thì chữ ký cũ đã bị TikTok đổi tên,
+    // cần đối chiếu file đo mới thay vì bám file đo cũ.
+    if (diag.dmItemCount === 0) {
+      try {
+        var allE2e = document.querySelectorAll('[data-e2e]');
+        var cc = 0, dc = 0;
+        for (var k = 0; k < allE2e.length; k++) {
+          var v = '';
+          try { v = (allE2e[k].getAttribute('data-e2e') || '').toLowerCase(); } catch (e) {}
+          if (v.indexOf('conversation') !== -1) cc++;
+          if (v.indexOf('dm-') === 0) dc++;
+        }
+        diag.e2eConversationCount = cc;
+        diag.e2eDmCount = dc;
+      } catch (e) {}
+    }
+    return { rows: out, diag: diag };
   }
   function listScan() {
-    if (!cfg.captureEnabled || location.pathname.indexOf('/messages') === -1) return;
+    // v1.2.9: cổng pathname (không so sánh href tuyệt đối) nên tham số URL mới của
+    // TikTok (?lang=vi-VN&from=homepage) không ảnh hưởng — quét chạy được cả trên
+    // /messages lẫn /business-suite/messages. Mọi lần quét đều ghi state.lastListDiag
+    // (chỉ số lượng) để log WATCHER_DIAG + popup chẩn đoán đọc được.
+    if (!cfg.captureEnabled || location.pathname.indexOf('/messages') === -1) {
+      state.lastListDiag = { dmItemCount: 0, nickCount: 0, dmRowsExtracted: 0, genericRows: 0, rowsOut: 0, branch: 'skipped', dropJunk: 0, dropNoName: 0, dropNameLong: 0, dropNoText: 0, dropDup: 0, dropError: 0, e2eConversationCount: -1, e2eDmCount: -1, frameCount: 0, path: location.pathname };
+      try { saveStats(); } catch (e) {}
+      return;
+    }
     try {
       // v1.2.5: LUÔN set listStats kể cả khi không tìm được cột hoặc 0 dòng, kèm reason
       // để popup phân biệt được "chưa quét" / "chưa tìm thấy cột" / "0 hội thoại".
       // v1.2.7: thử đường data-e2e trước; chỉ khi không có dòng nào mới dùng đường generic cũ.
       var now = new Date().toISOString();
-      var rows = extractDmRows();
+      var dm = extractDmRows();
+      var rows = dm.rows;
+      var diag = dm.diag;
+      diag.dmRowsExtracted = dm.rows.length;
+      diag.genericRows = 0;
+      diag.branch = 'dm';
       if (!rows.length) {
         var col = findListColumn();
         if (!col) {
+          diag.branch = 'no-column';
+          diag.rowsOut = 0;
+          diag.path = location.pathname;
+          try { diag.frameCount = window.frames ? window.frames.length : 0; } catch (e) { diag.frameCount = -1; }
+          state.lastListDiag = diag;
           state.listStats = { total: 0, unread: 0, reason: 'no-column', at: now };
           saveStats(); renderChip();
           return;
         }
         rows = extractListRows(col);
+        diag.genericRows = rows.length;
         if (!rows.length) {
+          diag.branch = 'no-rows';
+          diag.rowsOut = 0;
+          diag.path = location.pathname;
+          try { diag.frameCount = window.frames ? window.frames.length : 0; } catch (e) { diag.frameCount = -1; }
+          state.lastListDiag = diag;
           state.listStats = { total: 0, unread: 0, reason: 'no-rows', at: now };
           saveStats(); renderChip();
           return;
         }
+        diag.branch = 'generic';
       }
+      diag.rowsOut = rows.length;
+      try { diag.frameCount = window.frames ? window.frames.length : 0; } catch (e) { diag.frameCount = -1; }
+      diag.path = location.pathname;
+      state.lastListDiag = diag;
       var acctKey = cfg.accountId || (state.identity && state.identity.username) || state.account || '';
       var upserts = rows.map(function (r) {
         return {
@@ -875,8 +956,10 @@
         };
       });
       supa('conversations?on_conflict=account_id,counterpart', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: upserts }).catch(function () {});
+      // v1.2.8: số "chưa rep" = số hội thoại có direction 'in' (tin cuối của fan),
+      // không còn đếm theo dấu chưa đọc (tin đã đọc mà chưa rep vẫn tính là chưa rep).
       var unreadCount = 0;
-      for (var i = 0; i < rows.length; i++) { if (rows[i].unread === true) unreadCount++; }
+      for (var i = 0; i < rows.length; i++) { if (rows[i].direction === 'in') unreadCount++; }
       var changed = !state.listStats || state.listStats.total !== rows.length || state.listStats.unread !== unreadCount;
       state.listStats = { total: rows.length, unread: unreadCount, reason: 'ok', at: now };
       saveStats(); renderChip();
@@ -900,12 +983,12 @@
   function heartbeat() {
     detectDomIdentity();
     state.account = guessAccount();
-    var value = { account: state.account, accountId: cfg.accountId || '', identitySource: state.identity ? (state.identity.source || 'tab') : '', url: location.href, at: new Date().toISOString(), version: '1.2.7', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError, blockedUnknown: state.blockedUnknown };
+    var value = { account: state.account, accountId: cfg.accountId || '', identitySource: state.identity ? (state.identity.source || 'tab') : '', url: location.href, at: new Date().toISOString(), version: '1.2.9', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError, blockedUnknown: state.blockedUnknown };
     supa('app_state?on_conflict=key', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: { key: 'watcher_status', value: value, updated_at: new Date().toISOString() } }).catch(function () {});
     saveStats();
   }
   function saveStats() {
-    var st = { lastSync: state.lastSync, lastPush: state.lastPush, pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError, account: state.account, at: Date.now(), blockedUnknown: state.blockedUnknown, lastScanAllBlocked: state.lastScanAllBlocked };
+    var st = { lastSync: state.lastSync, lastPush: state.lastPush, pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError, account: state.account, at: Date.now(), blockedUnknown: state.blockedUnknown, lastScanAllBlocked: state.lastScanAllBlocked, lastListDiag: state.lastListDiag || null };
     if (state.listStats) { st.listTotal = state.listStats.total; st.listUnread = state.listStats.unread; st.listReason = state.listStats.reason || 'ok'; }
     storageSet({ pandaWatcherStats: st });
   }
@@ -1037,6 +1120,141 @@
     renderChip();
   }
 
+  /* ---------- v1.2.8: Tự lấy @username qua trang hồ sơ khi khởi động ---------- */
+  // BỐI CẢNH: 2 probe DOM thật chứng minh TikTok web KHÔNG render link /@ cho người xem
+  // (atLinkTotal 0 trên cả business-suite lẫn /messages) nên tab không tự lấy được @username
+  // từ DOM. Giải pháp theo lệnh user: khi khởi động mà chưa có identity thì tự đi qua trang
+  // hồ sơ 1 lần để lấy username từ URL, rồi quay về messages. Chạy tối đa 1 vòng đi-về mỗi
+  // phiên: cờ + mốc thời gian lưu chrome.storage.local (content script nạp lại mỗi lần
+  // chuyển trang nên cờ bộ nhớ không đủ giữ qua vòng đi-về). Chỉ TỰ KHỞI ĐỘNG trên trang
+  // messages (tránh cướp trang user đang xem dở ở nơi khác); trên trang hồ sơ chỉ lấy khi
+  // cờ đang bật — cờ tắt (user tự mở hồ sơ người khác xem) thì KHÔNG lấy gì, KHÔNG chuyển
+  // hướng, tránh nhận nhầm hồ sơ người khác làm tài khoản mình.
+  var PROFILE_USER_RE = /^\/@([A-Za-z0-9._]{2,24})(?:[?#\/]|$)/;
+  var IDENTITY_FETCH_WINDOW_MS = 30 * 60 * 1000; // 1 lần thử trong 30 phút coi như cùng phiên
+  var identityFetch009Logged = false;
+  var identityFetchPollTimer = null;
+  function extractProfileUsername(pathname) {
+    var m = String(pathname || '').match(PROFILE_USER_RE);
+    return m ? m[1] : '';
+  }
+  function getIdentityFetchRecord(cb) {
+    try { chrome.storage.local.get(['pandaWatcherIdentityFetch'], function (o) { cb((o && o.pandaWatcherIdentityFetch) || null); }); }
+    catch (e) { cb(null); }
+  }
+  function setIdentityFetchRecord(rec, cb) {
+    try { chrome.storage.local.set({ pandaWatcherIdentityFetch: rec }, function () { if (cb) cb(); }); }
+    catch (e) { if (cb) cb(); }
+  }
+  function findProfileButton() {
+    try {
+      var btn = document.querySelector('[data-e2e="profile-icon"]');
+      if (btn) return btn;
+      // Dự phòng Business Suite (probe không thấy profile-icon ở đó): tổ tiên bấm được
+      // gần nhất của ảnh đại diện trong header/nav.
+      var imgs = document.querySelectorAll('img');
+      for (var i = 0; i < imgs.length; i++) {
+        if (!elInTopBar(imgs[i])) continue;
+        var node = imgs[i];
+        while (node && node !== document.body) {
+          var tag = node.tagName || '';
+          var role = '';
+          try { role = node.getAttribute ? (node.getAttribute('role') || '') : ''; } catch (e) {}
+          if (tag === 'A' || tag === 'BUTTON' || role === 'button') return node;
+          node = node.parentElement;
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+  function visibleAtLinks() {
+    var out = [];
+    try {
+      var links = document.querySelectorAll('a');
+      for (var i = 0; i < links.length; i++) {
+        var href = '';
+        try { href = links[i].getAttribute ? (links[i].getAttribute('href') || '') : ''; } catch (e) {}
+        if (!PROFILE_USER_RE.test(href)) continue;
+        var r = links[i].getBoundingClientRect();
+        if (r && r.width > 0 && r.height > 0) out.push(links[i]);
+      }
+    } catch (e) {}
+    return out;
+  }
+  function failProfileFetch(reason) {
+    if (identityFetchPollTimer) { try { clearTimeout(identityFetchPollTimer); } catch (e) {} identityFetchPollTimer = null; }
+    getIdentityFetchRecord(function (rec) {
+      setIdentityFetchRecord({ inProgress: false, returnUrl: (rec && rec.returnUrl) || '', attemptedAt: (rec && rec.attemptedAt) || Date.now() });
+    });
+    if (!identityFetch009Logged) {
+      identityFetch009Logged = true;
+      logBE('WATCHER_PROFILE_FAIL', 'Không mở được trang hồ sơ để lấy @username: ' + reason, 'WATCHER_009');
+    }
+  }
+  function startProfileFetchClick() {
+    var btn = findProfileButton();
+    if (!btn) { failProfileFetch('Không thấy nút hồ sơ'); return; }
+    var before = visibleAtLinks().map(function (a) { try { return a.getAttribute('href') || ''; } catch (e) { return ''; } });
+    try { btn.click(); } catch (e) { failProfileFetch('Không bấm được nút hồ sơ'); return; }
+    // Sau khi bấm, hoặc trình duyệt tự chuyển trang (nút là link), hoặc menu hiện ra chứa
+    // link /@. Poll tối đa ~5s tìm link /@ MỚI xuất hiện rồi bấm nó; hết giờ thì dừng + log 1 lần.
+    var attempts = 0;
+    var maxAttempts = 13; // ~5.2s với bước 400ms
+    var poll = function () {
+      attempts++;
+      var links = visibleAtLinks();
+      var fresh = null;
+      for (var i = 0; i < links.length; i++) {
+        var href = '';
+        try { href = links[i].getAttribute('href') || ''; } catch (e) {}
+        if (before.indexOf(href) === -1) { fresh = links[i]; break; }
+      }
+      if (fresh) {
+        try { fresh.click(); } catch (e) {}
+        return; // trình duyệt tự chuyển tới trang hồ sơ; cờ vẫn bật để bước lấy xử lý
+      }
+      if (attempts >= maxAttempts) { failProfileFetch('Không thấy link hồ sơ trong menu sau ~5s'); return; }
+      identityFetchPollTimer = setTimeout(poll, 400);
+    };
+    identityFetchPollTimer = setTimeout(poll, 400);
+  }
+  function maybeStartProfileIdentityFetch() {
+    if (!isMessagesPage()) return;
+    // Đã có identity (mạng/tab/DOM/profile) hoặc đã điền tay @username -> không làm gì thêm.
+    if (state.identity && state.identity.username) return;
+    if (cfg.account && cfg.account.replace(/^@/, '')) return;
+    getIdentityFetchRecord(function (rec) {
+      var now = Date.now();
+      if (rec && rec.inProgress) {
+        // Đã quay về messages mà không qua bước lấy ở trang hồ sơ (vòng trước hỏng giữa
+        // chừng / user tự quay lại) -> xóa cờ để lần sau ghé hồ sơ người khác không bị nhận
+        // nhầm; giữ attemptedAt để không thử lại trong phiên này.
+        setIdentityFetchRecord({ inProgress: false, returnUrl: rec.returnUrl || '', attemptedAt: rec.attemptedAt || now });
+        return;
+      }
+      if (rec && rec.attemptedAt && (now - rec.attemptedAt < IDENTITY_FETCH_WINDOW_MS)) return; // đã thử trong phiên
+      setIdentityFetchRecord({ inProgress: true, returnUrl: location.href, attemptedAt: now }, function () {
+        startProfileFetchClick();
+      });
+    });
+  }
+  function handleProfilePageCapture() {
+    var username = extractProfileUsername(location.pathname);
+    if (!username) return;
+    getIdentityFetchRecord(function (rec) {
+      if (!rec || !rec.inProgress) return; // cờ TẮT: user tự mở hồ sơ người khác -> KHÔNG lấy, KHÔNG chuyển hướng
+      var id = { username: username, user_id: '', user_id_str: '', sec_user_id: '', screen_name: '', avatar_url: '', source: 'profile' };
+      state.identity = id;
+      state.account = username;
+      var back = (rec && rec.returnUrl) || BS_HOME;
+      setIdentityFetchRecord({ inProgress: false, returnUrl: '', attemptedAt: rec.attemptedAt || Date.now() });
+      storageSet({ pandaWatcherIdentity: Object.assign({}, id, { at: Date.now() }) });
+      saveStats();
+      logBE('WATCHER_IDENTITY', 'Tự nhận identity từ trang hồ sơ: @' + username, 'WATCHER_006');
+      try { location.href = back; } catch (e) {}
+    });
+  }
+
   /* ---------- Khởi động ---------- */
   // v1.2.3: hook.js đã chạy sẵn dưới dạng content script MAIN world ở document_start
   // (khai trong manifest) nên KHÔNG còn chèn thẻ script ở đây nữa.
@@ -1046,7 +1264,9 @@
     // v1.2.1: tự nhận Account ID từ bản web (bridge ghi pandaWatcherAccountId / pandaWatcherLogin)
     // để tin đẩy lên gắn đúng acc mà không cần điền tay; ô nhập popup chỉ còn là ghi đè thủ công.
     var boot = function () {
+      handleProfilePageCapture(); // trang hồ sơ + cờ bật -> lấy username từ URL rồi về messages
       detectDomIdentity();
+      maybeStartProfileIdentityFetch(); // trang messages + chưa có identity -> đi hồ sơ 1 vòng duy nhất
       buildChip();
       setInterval(buildChip, 4000);
       setInterval(renderChip, 5000);
@@ -1081,7 +1301,16 @@
 
   try {
     chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-      if (msg && msg.type === 'PANDA_SCAN_NOW') { scanAll(); flush(); heartbeat(); sendResponse({ ok: true, pushedTotal: state.pushedTotal }); }
+      if (msg && msg.type === 'PANDA_SCAN_NOW') {
+        scanAll(); flush(); heartbeat();
+        // v1.2.9: log chẩn đoán quét danh sách — CHỈ SỐ LƯỢNG, không tên/xem trước/
+        // nội dung. Chạy trên mọi lần quét tay, cả /messages lẫn business-suite/messages.
+        try {
+          var d = state.lastListDiag || {};
+          logBE('WATCHER_DIAG', 'Chan doan quet danh sach: path=' + (d.path || location.pathname) + ' dmItems=' + (d.dmItemCount || 0) + ' nick=' + (d.nickCount || 0) + ' dmRows=' + (d.dmRowsExtracted || 0) + ' generic=' + (d.genericRows || 0) + ' rowsOut=' + (d.rowsOut || 0) + ' branch=' + (d.branch || '?') + ' loai: junk=' + (d.dropJunk || 0) + ' khong-ten=' + (d.dropNoName || 0) + ' ten-dai=' + (d.dropNameLong || 0) + ' khong-text=' + (d.dropNoText || 0) + ' trung=' + (d.dropDup || 0) + ' loi-dong=' + (d.dropError || 0) + ' e2e-conv=' + (d.e2eConversationCount !== undefined ? d.e2eConversationCount : -1) + ' e2e-dm=' + (d.e2eDmCount !== undefined ? d.e2eDmCount : -1) + ' frames=' + (d.frameCount !== undefined ? d.frameCount : -1), 'WATCHER_DIAG');
+        } catch (e) {}
+        sendResponse({ ok: true, pushedTotal: state.pushedTotal });
+      }
       if (msg && msg.type === 'PANDA_GET_STATE') { sendResponse({ state: state, cfg: { captureEnabled: cfg.captureEnabled, autoSendEnabled: cfg.autoSendEnabled, account: cfg.account } }); }
       return true;
     });
