@@ -48,6 +48,14 @@
     chrome.tabs.create({ url: 'https://nameerrorcantnotfind.github.io/cyan-pandatool/' });
   });
 
+  $('btnReload').addEventListener('click', function () {
+    chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
+      var t = tabs && tabs[0];
+      if (t && t.url && t.url.indexOf('tiktok.com') !== -1) chrome.tabs.reload(t.id);
+      else chrome.tabs.create({ url: 'https://www.tiktok.com/business-suite/messages' });
+    });
+  });
+
   $('btnSuite').addEventListener('click', function () {
     chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
       var t = tabs && tabs[0];

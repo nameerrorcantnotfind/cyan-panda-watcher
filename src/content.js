@@ -230,7 +230,7 @@
   /* ---------- Heartbeat ---------- */
   function heartbeat() {
     state.account = guessAccount();
-    var value = { account: state.account, accountId: cfg.accountId || '', url: location.href, at: new Date().toISOString(), version: '1.1.0', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError };
+    var value = { account: state.account, accountId: cfg.accountId || '', url: location.href, at: new Date().toISOString(), version: '1.1.1', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError };
     supa('app_state?on_conflict=key', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: { key: 'watcher_status', value: value, updated_at: new Date().toISOString() } }).catch(function () {});
     saveStats();
   }
@@ -238,7 +238,7 @@
     storageSet({ pandaWatcherStats: { lastSync: state.lastSync, lastPush: state.lastPush, pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError, account: state.account, at: Date.now() } });
   }
 
-  /* ---------- Thực thi hàng đợi gửi (chỉ khi BẬT tự gửi) ---------- */
+  /* ---------- Thực thi hàng đợi gửi (chỉ khi BẬT tự trả lời) ---------- */
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
   function setComposerText(el, text) {
@@ -334,7 +334,7 @@
       '<br>Đã đẩy: <b>' + state.pushedTotal + '</b> tin · Bắt được: ' + state.capturedTotal + ' gói' +
       (state.lastSync ? '<br>Đồng bộ cuối: ' + new Date(state.lastSync).toLocaleTimeString('vi-VN') : '') +
       (state.lastError ? '<br><span style="color:#ffb74d">' + state.lastError.slice(0, 120) + '</span>' : '') +
-      '<br><span style="opacity:.75;font-size:11px">Chạy ' + hb + 's · Tự gửi: ' + (cfg.autoSendEnabled ? 'BẬT' : 'tắt') + '</span>';
+      '<br><span style="opacity:.75;font-size:11px">Chạy ' + hb + 's · Tự trả lời: ' + (cfg.autoSendEnabled ? 'BẬT' : 'tắt') + '</span>';
   }
   function buildChip() {
     if (chip || !document.body) return;
