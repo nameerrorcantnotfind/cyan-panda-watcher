@@ -22,18 +22,22 @@
   }
 
   function load() {
-    chrome.storage.local.get(['pandaWatcherCfg', 'pandaWatcherStats', 'pandaWatcherAccountId', 'pandaWatcherLogin'], function (o) {
+    chrome.storage.local.get(['pandaWatcherCfg', 'pandaWatcherStats', 'pandaWatcherAccountId', 'pandaWatcherLogin', 'pandaWatcherIdentity'], function (o) {
       var cfg = o.pandaWatcherCfg || {};
       var st = o.pandaWatcherStats || {};
       var autoId = cfg.accountId || (o.pandaWatcherAccountId && o.pandaWatcherAccountId.open_id) || (o.pandaWatcherLogin && o.pandaWatcherLogin.account && o.pandaWatcherLogin.account.open_id) || '';
-      var autoUser = cfg.account || st.account || '';
+      var ident = o.pandaWatcherIdentity || null;
+      var autoUser = (ident && ident.username) || cfg.account || st.account || '';
       $('ckCapture').checked = cfg.captureEnabled !== false;
       $('ckAuto').checked = !!cfg.autoSendEnabled;
       $('inAccount').value = autoUser;
       $('inAccountId').value = autoId;
+      // v1.2.2: identity tự nhận từ chính tab TikTok — hiện rõ nguồn, khỏi dòng "Chưa tự nhận được"
       $('autoNote').textContent = autoId
         ? '✅ Account ID đã tự nhận từ bản web — không cần điền tay.'
-        : 'Chưa tự nhận được Account ID — mở bản web đã đăng nhập TikTok 1 lần là tự nhận.';
+        : (ident && ident.username
+          ? '✅ @' + ident.username + ' đã tự nhận từ tab TikTok — không cần đăng nhập web.'
+          : 'Chưa tự nhận được tài khoản — mở 1 tab TikTok đã đăng nhập là Watcher tự nhận từ tab đó.');
       var age = st.at ? Math.round((Date.now() - st.at) / 1000) : null;
       if (st.at && age < 180) {
         $('stDot').className = 'dot ' + (st.captcha ? 'err' : 'on');

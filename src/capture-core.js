@@ -126,5 +126,53 @@
     return out;
   }
 
-  return { fnv: fnv, slugify: slugify, dedupeKey: dedupeKey, normalizeMessage: normalizeMessage, scanJsonForMessages: scanJsonForMessages, toDate: toDate };
+  // v1.2.2 — Recognizer cho 2 endpoint allowlist (xác minh từ log thật trên máy người dùng).
+  // (a) passport/web/account/info -> identity của NGƯỜI XEM (chính chủ tab TikTok).
+  // Trả về { username, user_id, user_id_str, sec_user_id, screen_name, avatar_url } hoặc null.
+  function parsePassportAccountInfo(json) {
+    if (!json || typeof json !== 'object') return null;
+    var d = json.data;
+    if (!d || typeof d !== 'object') return null;
+    if (!d.username && !d.user_id && !d.user_id_str) return null;
+    return {
+      username: d.username ? String(d.username) : '',
+      user_id: d.user_id !== undefined && d.user_id !== null ? String(d.user_id) : '',
+      user_id_str: d.user_id_str ? String(d.user_id_str) : '',
+      sec_user_id: d.sec_user_id ? String(d.sec_user_id) : '',
+      screen_name: d.screen_name ? String(d.screen_name) : '',
+      avatar_url: d.avatar_url ? String(d.avatar_url) : ''
+    };
+  }
+
+  // (b) tiktok/v1/im/user/profile -> map đối tác.
+  // Trả về { byId: { user_id/user_id_str -> { unique_id, nick_name, user_id, user_id_str } },
+  //           byName: { nick_name đã chuẩn hoá (bỏ dấu, thường) -> unique_id } }.
+  // byName dùng để đối chiếu tên hiển thị trên tiêu đề hội thoại -> @username thật
+  // (sửa lỗi fan "unknown" trước đây, khi map chỉ dựa vào slug tên).
+  function normName(s) {
+    return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/đ/g, 'd').replace(/Đ/g, 'D').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+  function parseImUserProfiles(json) {
+    var byId = {}, byName = {};
+    if (!json || typeof json !== 'object' || !Array.isArray(json.users)) return { byId: byId, byName: byName };
+    for (var i = 0; i < json.users.length; i++) {
+      var u = json.users[i];
+      var p = (u && u.im_user_profile) || null;
+      if (!p) continue;
+      var rec = {
+        unique_id: p.unique_id ? String(p.unique_id) : '',
+        nick_name: p.nick_name ? String(p.nick_name) : '',
+        user_id: p.user_id !== undefined && p.user_id !== null ? String(p.user_id) : '',
+        user_id_str: p.user_id_str ? String(p.user_id_str) : ''
+      };
+      if (rec.user_id) byId[rec.user_id] = rec;
+      if (rec.user_id_str) byId[rec.user_id_str] = rec;
+      var nn = normName(rec.nick_name);
+      if (nn && rec.unique_id) byName[nn] = rec.unique_id;
+    }
+    return { byId: byId, byName: byName };
+  }
+
+  return { fnv: fnv, slugify: slugify, dedupeKey: dedupeKey, normalizeMessage: normalizeMessage, scanJsonForMessages: scanJsonForMessages, toDate: toDate, parsePassportAccountInfo: parsePassportAccountInfo, parseImUserProfiles: parseImUserProfiles, normName: normName };
 });

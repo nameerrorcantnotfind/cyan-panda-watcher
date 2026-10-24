@@ -14,7 +14,7 @@
   if (!CORE) return;
 
   var cfg = Object.assign({}, D);
-  var state = { account: '', startedAt: Date.now(), lastSync: null, lastPush: 0, pushedTotal: 0, capturedTotal: 0, captcha: false, lastError: '', queueBusy: false };
+  var state = { account: '', identity: null, profileById: {}, profileByName: {}, domSeen: {}, startedAt: Date.now(), lastSync: null, lastPush: 0, pushedTotal: 0, capturedTotal: 0, captcha: false, lastError: '', queueBusy: false };
   var pushedKeys = new Set();
   var buffer = [];
   var flushTimer = null;
@@ -43,6 +43,9 @@
   }
 
   function guessAccount() {
+    // v1.2.2: ưu tiên identity tự nhận từ chính tab TikTok (passport account/info),
+    // rồi mới tới username điền tay trong popup, rồi link profile trên trang.
+    if (state.identity && state.identity.username) return state.identity.username;
     if (cfg.account) return cfg.account.replace(/^@/, '');
     var a = document.querySelector('a[href^="/@"]');
     if (a) { var m = a.getAttribute('href').match(/^\/@([^\/]+)/); if (m) return m[1]; }
@@ -130,7 +133,21 @@
     await sleep(4500);
   }
 
-  /* ---------- Nhận data từ hook (page world) ---------- */
+  /* ---------- Nhận data từ hook (page world) — v1.2.2: chỉ 2 endpoint allowlist ---------- */
+  function applyIdentity(id) {
+    if (!id || !id.username) return;
+    state.identity = id;
+    state.account = id.username;
+    if (!cfg.account) cfg.account = id.username;
+    storageSet({ pandaWatcherIdentity: { username: id.username, user_id: id.user_id || '', user_id_str: id.user_id_str || '', sec_user_id: id.sec_user_id || '', screen_name: id.screen_name || '', avatar_url: id.avatar_url || '', at: Date.now(), source: 'tab' } });
+    saveStats();
+  }
+  function applyProfiles(parsed) {
+    if (!parsed) return;
+    Object.assign(state.profileById, parsed.byId);
+    Object.assign(state.profileByName, parsed.byName);
+    try { storageSet({ pandaWatcherProfiles: state.profileById }); } catch (e) {}
+  }
   window.addEventListener('message', function (ev) {
     if (ev.origin !== location.origin || !ev.data || ev.data.__panda !== 'capture') return;
     if (!cfg.captureEnabled) return;
@@ -139,9 +156,16 @@
     var json = safeJson(body);
     if (!json) return;
     state.capturedTotal++;
-    var raws = [];
-    try { raws = CORE.scanJsonForMessages(json, guessAccount()); } catch (e) {}
-    for (var i = 0; i < raws.length; i++) enqueue(raws[i]);
+    var url = ev.data.url || '';
+    try {
+      if (url.indexOf('passport/web/account/info') !== -1) {
+        var id = CORE.parsePassportAccountInfo(json);
+        if (id) applyIdentity(id);
+      } else if (url.indexOf('tiktok/v1/im/user/profile') !== -1) {
+        applyProfiles(CORE.parseImUserProfiles(json));
+      }
+      // Tin nhắn KHÔNG lấy từ tầng mạng (im-api trả protobuf rỗng) — lấy từ DOM (domScan).
+    } catch (e) {}
   });
 
   function enqueue(raw) {
@@ -164,7 +188,11 @@
       if (res.ok && Array.isArray(res.json)) res.json.forEach(function (r) { existing[r.dedupe_key] = 1; });
       var fresh = rows.filter(function (r) { return !existing[r.dedupe_key]; });
       if (!fresh.length) { state.lastSync = new Date().toISOString(); saveStats(); return; }
-      if (cfg.accountId) fresh.forEach(function (r) { r.account_id = cfg.accountId; });
+      // v1.2.2: account key cho dòng đẩy lên — ưu tiên open_id (web bridge), nếu không có
+      // thì dùng @username tự nhận từ chính tab TikTok (identity passport). Tool v3.16 đọc
+      // cả 2 dạng nên vòng lặp chạy được mà không cần đăng nhập web trước.
+      var acctKey = cfg.accountId || (state.identity && state.identity.username) || state.account || '';
+      if (acctKey) fresh.forEach(function (r) { r.account_id = acctKey; });
       return supa('messages', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: fresh }).then(function (r2) {
         if (r2.ok) {
           state.lastPush = fresh.length;
@@ -181,38 +209,165 @@
     }).catch(function (e) { state.lastError = 'Lỗi mạng khi đẩy Supabase: ' + e.message; saveStats(); renderChip(); });
   }
 
-  /* ---------- Quét DOM (tầng dự phòng, best-effort) ---------- */
+  /* ---------- v1.2.2: Quét DOM KHÔNG phụ thuộc tên class hash ---------- */
+  // Tin nhắn chỉ lấy được từ DOM đã render (im-api trả protobuf rỗng, không có JSON tin nhắn).
+  // Neo theo ô soạn tin (placeholder chứa "Gửi tin nhắn") -> tìm khung hội thoại là container
+  // cuộn được chứa tin nhắn (không phải cột danh sách) -> duyệt các khối tin con:
+  // text = innerText đã bỏ dòng chỉ là giờ/ngày; hướng = vị trí ngang block so với giữa khung
+  // (phải = mình gửi, trái = đối tác); timestamp = giờ/ngày gần nhất trong hàng chứa block;
+  // đối tác = tiêu đề hội thoại (h2, không phải "Tin nhắn"), đối chiếu map profile
+  // (nick_name -> unique_id) khi có để khỏi rơi về "unknown".
   function parseVnTime(txt) {
     if (!txt) return null;
     var m = String(txt).match(/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}))?/);
     if (m) return new Date(+m[3], +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0));
+    m = String(txt).match(/(\d{1,2})\/(\d{1,2})(?!\d)/);
+    if (m) { var y = new Date().getFullYear(); return new Date(y, +m[2] - 1, +m[1]); }
     m = String(txt).match(/(\d{1,2}):(\d{2})/);
     if (m) { var d = new Date(); d.setHours(+m[1], +m[2], 0, 0); return d; }
+    return null;
+  }
+  function stripTimeLines(txt) {
+    var lines = String(txt || '').split('\n');
+    var out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var ln = lines[i].trim();
+      if (!ln) continue;
+      if (/^\d{1,2}:\d{2}$/.test(ln)) continue;
+      if (/^\d{1,2}\/\d{1,2}(\/\d{4})?$/.test(ln)) continue;
+      out.push(ln);
+    }
+    return out.join('\n').trim();
+  }
+  function conversationTitle() {
+    try {
+      var heads = document.querySelectorAll('h2');
+      for (var i = 0; i < heads.length; i++) {
+        var t = (heads[i].innerText || '').trim();
+        if (!t || t.length > 80) continue;
+        if (normText(t) === 'tin nhan') continue;
+        return t;
+      }
+    } catch (e) {}
+    return '';
+  }
+  function findComposer() {
+    try {
+      var tas = document.querySelectorAll('textarea');
+      for (var i = 0; i < tas.length; i++) {
+        var ph = '';
+        try { ph = tas[i].placeholder || (tas[i].getAttribute ? (tas[i].getAttribute('placeholder') || '') : ''); } catch (e) {}
+        if (ph.indexOf('Gửi tin nhắn') !== -1) return tas[i];
+      }
+      var eds = document.querySelectorAll('[contenteditable="true"]');
+      for (var j = 0; j < eds.length; j++) {
+        var ph2 = '';
+        try { ph2 = eds[j].getAttribute ? (eds[j].getAttribute('placeholder') || eds[j].getAttribute('aria-label') || '') : ''; } catch (e) {}
+        if (ph2.indexOf('Gửi tin nhắn') !== -1) return eds[j];
+      }
+      // Fallback: textbox cuối cùng trong khung chat (khi placeholder đã bị thay bằng text đã nhập)
+      var all = document.querySelectorAll('textarea, [contenteditable="true"]');
+      if (all.length) return all[all.length - 1];
+    } catch (e) {}
+    return null;
+  }
+  function isScrollable(el) {
+    try { return el && el.scrollHeight > el.clientHeight + 20; } catch (e) { return false; }
+  }
+  function containsListHeader(el) {
+    try {
+      var heads = el.querySelectorAll('h2');
+      for (var i = 0; i < heads.length; i++) { if (normText(heads[i].innerText) === 'tin nhan') return true; }
+    } catch (e) {}
+    return false;
+  }
+  function findMessagePane(composer) {
+    // Ưu tiên: container cuộn được nằm trên ô soạn, cùng cột chat, không chứa cột danh sách.
+    var cands = [];
+    try {
+      var all = document.querySelectorAll('*');
+      for (var i = 0; i < all.length; i++) { if (isScrollable(all[i])) cands.push(all[i]); }
+    } catch (e) {}
+    var cr = null;
+    try { cr = composer.getBoundingClientRect(); } catch (e) {}
+    var best = null, bestScore = -1;
+    for (var j = 0; j < cands.length; j++) {
+      var el = cands[j];
+      if (containsListHeader(el)) continue;
+      var r = null;
+      try { r = el.getBoundingClientRect(); } catch (e) { continue; }
+      if (!r || r.width <= 0) continue;
+      var score = 0;
+      if (cr) {
+        var midEl = r.left + r.width / 2, midCo = cr.left + cr.width / 2;
+        if (Math.abs(midEl - midCo) < 120) score += 2;   // cùng cột với ô soạn
+        if (r.bottom <= cr.top + 10) score += 2;          // khung tin nằm trên ô soạn
+      }
+      if (score > bestScore) { bestScore = score; best = el; }
+    }
+    if (best) return best;
+    // Fallback: tổ tiên cuộn được gần nhất của ô soạn
+    var el2 = composer.parentElement;
+    while (el2 && el2 !== document.body) { if (isScrollable(el2)) return el2; el2 = el2.parentElement; }
     return null;
   }
 
   function domScan() {
     if (!cfg.captureEnabled || location.pathname.indexOf('/messages') === -1) return;
     try {
-      // Danh sách hội thoại: các hàng có avatar + tên + preview (heuristic, ghi via:'dom')
-      var items = document.querySelectorAll('[data-e2e="chat-list-item"], [class*="ChatListItem"], [class*="ConversationItem"]');
+      var composer = findComposer();
+      if (!composer) return;   // chưa mở hội thoại nào -> không có gì để quét
+      var pane = findMessagePane(composer);
+      if (!pane) return;
+      var title = conversationTitle();
+      var partnerUser = (title && state.profileByName[CORE.normName(title)]) || '';
+      var pr = pane.getBoundingClientRect();
+      var midX = pr.left + pr.width / 2;
+      // Nhánh chứa ô soạn trong pane (để loại khỏi vùng quét khi pane là cột chat rộng)
+      var composerBranch = null;
+      (function () {
+        var n = composer;
+        while (n && n.parentElement && n.parentElement !== pane) n = n.parentElement;
+        if (n && n.parentElement === pane) composerBranch = n;
+      })();
+      var nodes = pane.querySelectorAll('*');
+      for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        if (composerBranch) {
+          var p = el, insideComposer = false;
+          while (p && p !== pane) { if (p === composerBranch) { insideComposer = true; break; } p = p.parentElement; }
+          if (insideComposer) continue;
+        }
+        if (el === composer) continue;
+        var r = null;
+        try { r = el.getBoundingClientRect(); } catch (e) { continue; }
+        if (!r || r.width < 30 || r.width > pr.width * 0.92 || r.height <= 0) continue;
+        var rawText = (el.innerText || '').trim();
+        if (!rawText) continue;
+        // Chỉ giữ khối trong cùng: bỏ phần tử mà một phần tử con có cùng innerText
+        var dup = false;
+        try {
+          var kids = el.querySelectorAll('*');
+          for (var k = 0; k < kids.length; k++) { if ((kids[k].innerText || '').trim() === rawText) { dup = true; break; } }
+        } catch (e) {}
+        if (dup) continue;
+        var txt = stripTimeLines(rawText);
+        if (!txt || txt.length > 2000) continue;
+        if (title && normText(txt) === normText(title)) continue;   // tiêu đề, không phải tin
+        var isOut = (r.left + r.width / 2) > midX;
+        var rowText = '';
+        try { rowText = (el.parentElement && el.parentElement.innerText) || ''; } catch (e) {}
+        var at = parseVnTime(rowText) || parseVnTime(rawText);
+        var dir = isOut ? 'out' : 'in';
+        if (!at) {
+          // Không thấy timestamp: dùng mốc lần đầu thấy trong phiên để khoá dedupe ổn định
+          var sig = (partnerUser || title || 'conv') + '|' + dir + '|' + CORE.fnv(txt);
+          if (state.domSeen[sig]) at = new Date(state.domSeen[sig]);
+          else { at = new Date(); state.domSeen[sig] = at.toISOString(); }
+        }
+        enqueue({ account: guessAccount(), counterpartName: title, counterpartUsername: partnerUser, direction: dir, content: txt, at: at, via: 'dom' });
+      }
       state.account = guessAccount();
-      // Bong bóng tin trong hội thoại đang mở
-      var bubbles = document.querySelectorAll('[data-e2e*="message-item"], [class*="MessageItem"], [class*="ChatMessage"]');
-      var title = '';
-      var header = document.querySelector('[data-e2e="chat-header"], [class*="ChatHeader"]');
-      if (header) title = (header.innerText || '').split('\n')[0].trim();
-      bubbles.forEach(function (b) {
-        var txt = (b.innerText || '').trim();
-        if (!txt || txt.length > 2000) return;
-        var rect = b.getBoundingClientRect();
-        var parent = b.closest('[class*="Chat"]') || document.body;
-        var pr = parent.getBoundingClientRect();
-        var isOut = (rect.left + rect.width / 2) > (pr.left + pr.width / 2);
-        var timeEl = b.querySelector('time, [class*="Time"], [class*="time"]');
-        enqueue({ account: state.account, counterpartName: title, direction: isOut ? 'out' : 'in', content: txt.split('\n')[0], at: parseVnTime(timeEl ? timeEl.innerText : '') || new Date(), via: 'dom' });
-      });
-      if (items.length) state.lastDomList = items.length;
     } catch (e) {}
   }
 
@@ -230,7 +385,7 @@
   /* ---------- Heartbeat ---------- */
   function heartbeat() {
     state.account = guessAccount();
-    var value = { account: state.account, accountId: cfg.accountId || '', url: location.href, at: new Date().toISOString(), version: '1.2.1', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError };
+    var value = { account: state.account, accountId: cfg.accountId || '', identitySource: state.identity ? 'tab' : '', url: location.href, at: new Date().toISOString(), version: '1.2.2', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError };
     supa('app_state?on_conflict=key', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: { key: 'watcher_status', value: value, updated_at: new Date().toISOString() } }).catch(function () {});
     saveStats();
   }
@@ -262,17 +417,29 @@
     el.click();
     await sleep(2500);
     if (detectCaptcha()) throw new Error('CAPTCHA đang hiện — dừng gửi');
-    var composer = document.querySelector('[data-e2e="message-input"] textarea, [data-e2e="message-input"] [contenteditable="true"], div[class*="Composer"] textarea, div[class*="Composer"] [contenteditable="true"]');
+    var composer = findComposer();
     if (!composer) throw new Error('Không tìm thấy ô nhập tin nhắn');
+    var pane0 = null;
+    try { pane0 = findMessagePane(composer); } catch (e) {}
+    function paneHas(pane, needle) {
+      if (!pane || !needle) return false;
+      try {
+        var ns = pane.querySelectorAll('*');
+        for (var i = 0; i < ns.length; i++) { if ((ns[i].innerText || '').indexOf(needle) !== -1) return true; }
+      } catch (e) {}
+      return false;
+    }
+    var hadBefore = paneHas(pane0, job.content.slice(0, 40));
+    var before = (document.querySelectorAll('[data-e2e*="message-item"], [class*="MessageItem"]').length);
     setComposerText(composer, job.content);
     await sleep(1200);
-    var before = (document.querySelectorAll('[data-e2e*="message-item"], [class*="MessageItem"]').length);
     var sendBtn = document.querySelector('[data-e2e="message-send"], button[aria-label*="Send"], button[aria-label*="Gửi"]');
     if (sendBtn) sendBtn.click();
     else composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
     await sleep(2500);
     var bubbles = document.querySelectorAll('[data-e2e*="message-item"], [class*="MessageItem"], [class*="ChatMessage"]');
     var ok = false;
+    if (pane0 && paneHas(pane0, job.content.slice(0, 40)) && !hadBefore) ok = true;   // v1.2.2: xác minh không phụ thuộc class
     bubbles.forEach(function (b) { if ((b.innerText || '').indexOf(job.content.slice(0, 40)) !== -1) ok = true; });
     if (!ok && bubbles.length <= before) throw new Error('Đã bấm gửi nhưng không thấy bong bóng tin xuất hiện');
     return true;
@@ -280,7 +447,11 @@
 
   function pollQueue() {
     if (!cfg.autoSendEnabled || state.queueBusy || state.captcha) return;
-    var aq = cfg.accountId ? '&account_id=eq.' + encodeURIComponent(cfg.accountId) : '&account_id=is.null';
+    // v1.2.2: lọc queue theo open_id nếu có, nếu không theo @username từ tab TikTok (+ dòng cũ chưa gắn acc)
+    var aq;
+    if (cfg.accountId) aq = '&account_id=eq.' + encodeURIComponent(cfg.accountId);
+    else if (state.identity && state.identity.username) aq = '&or=(account_id.eq.' + encodeURIComponent(state.identity.username) + ',account_id.is.null)';
+    else aq = '&account_id=is.null';
     supa('queue?select=*&status=eq.approved' + aq + '&order=created_at.asc&limit=1').then(async function (res) {
       if (!res.ok || !Array.isArray(res.json) || !res.json.length) return;
       var job = res.json[0];
@@ -371,9 +542,22 @@
       logBE('WATCHER_START', 'Watcher khởi động trên tab TikTok (account: ' + (guessAccount() || 'chưa rõ') + ')', 'WATCHER_000');
     };
     try {
-      chrome.storage.local.get(['pandaWatcherLogin', 'pandaWatcherAccountId'], function (a) {
+      chrome.storage.local.get(['pandaWatcherLogin', 'pandaWatcherAccountId', 'pandaWatcherIdentity', 'pandaWatcherProfiles'], function (a) {
         var autoId = (a && a.pandaWatcherLogin && a.pandaWatcherLogin.account && a.pandaWatcherLogin.account.open_id) || (a && a.pandaWatcherAccountId && a.pandaWatcherAccountId.open_id) || '';
         if (autoId && !cfg.accountId) { cfg.accountId = autoId; storageSet({ pandaWatcherCfg: cfg }); }
+        // v1.2.2: khôi phục identity + map profile đã nhận từ tab TikTok ở phiên trước
+        if (a && a.pandaWatcherIdentity && a.pandaWatcherIdentity.username && !state.identity) {
+          state.identity = a.pandaWatcherIdentity;
+          state.account = a.pandaWatcherIdentity.username;
+        }
+        if (a && a.pandaWatcherProfiles) {
+          Object.assign(state.profileById, a.pandaWatcherProfiles);
+          Object.keys(state.profileById).forEach(function (k) {
+            var rec = state.profileById[k];
+            var nn = CORE.normName(rec.nick_name || '');
+            if (nn && rec.unique_id) state.profileByName[nn] = rec.unique_id;
+          });
+        }
         boot();
       });
     } catch (e) { boot(); }
