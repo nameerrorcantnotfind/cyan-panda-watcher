@@ -39,3 +39,9 @@ Data thật của CYAN không bị đụng.
 - Giữ nguyên: accountId (v1.0.1), lọc queue theo acc, CAPTCHA dừng + báo, gửi xong mới ghi sent.
 - Kiểm thử: node --check toàn bộ src/*.js PASS; harness314 (tool web) 5/5 PASS (nút mở + ghi watcher_open đúng username/displayName/at).
 - CHƯA xác minh trên acc chính: class hash thật của dòng/bong bóng, nút Gửi có hiện sau khi nhập không, ô Tìm kiếm chung có lọc hội thoại không, infinite scroll với 1631 hội thoại — chốt bằng lượt chạy thật đầu tiên trên Chrome của CYAN.
+
+## v1.1.1 — Tự trả lời (25/10, theo luật mới của CYAN)
+- Đổi tên "chế độ treo" → "Tự trả lời" (popup + chip trạng thái trên trang).
+- Thêm nút "↻ Tải lại tab TikTok" trong popup: bấm sau khi giải CAPTCHA tay xong để trang sạch lại rồi Watcher chạy tiếp (do người bấm, không tự lách CAPTCHA).
+- KHÔNG thêm: tự đóng tab/mở lại để qua CAPTCHA (mở lại vẫn hiện CAPTCHA vì trạng thái chặn nằm phía server TikTok, mở lại nhiều lần còn giống bot hơn), không xóa khung CAPTCHA để lách (thao tác vẫn bị chặn phía server).
+- Đi kèm tool web v3.15: vòng Tự trả lời + luật tin nhạy cảm mới (xem changelog v3.15).
