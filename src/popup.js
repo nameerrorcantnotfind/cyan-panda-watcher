@@ -1,4 +1,4 @@
-// Cyan Panda Watcher — popup.js (v1.2.9)
+// Cyan Panda Watcher — popup.js (v1.2.10)
 // v1.2.3: ghi chú nguồn identity — 'tab TikTok' = gói mạng passport, 'tab TikTok (DOM)' =
 // fallback nhận diện từ link avatar header khi gói mạng không về. Các tính năng v1.2.1 giữ
 // nguyên: ID + username tự nhận, mọi nút bấm đều hiện toast + cập nhật trạng thái.

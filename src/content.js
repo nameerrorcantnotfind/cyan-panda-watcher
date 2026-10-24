@@ -983,7 +983,7 @@
   function heartbeat() {
     detectDomIdentity();
     state.account = guessAccount();
-    var value = { account: state.account, accountId: cfg.accountId || '', identitySource: state.identity ? (state.identity.source || 'tab') : '', url: location.href, at: new Date().toISOString(), version: '1.2.9', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError, blockedUnknown: state.blockedUnknown };
+    var value = { account: state.account, accountId: cfg.accountId || '', identitySource: state.identity ? (state.identity.source || 'tab') : '', url: location.href, at: new Date().toISOString(), version: '1.2.10', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError, blockedUnknown: state.blockedUnknown };
     supa('app_state?on_conflict=key', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: { key: 'watcher_status', value: value, updated_at: new Date().toISOString() } }).catch(function () {});
     saveStats();
   }
@@ -1134,6 +1134,7 @@
   var IDENTITY_FETCH_WINDOW_MS = 30 * 60 * 1000; // 1 lần thử trong 30 phút coi như cùng phiên
   var identityFetch009Logged = false;
   var identityFetchPollTimer = null;
+  var identityFetchButtonTimer = null;
   function extractProfileUsername(pathname) {
     var m = String(pathname || '').match(PROFILE_USER_RE);
     return m ? m[1] : '';
@@ -1183,6 +1184,7 @@
   }
   function failProfileFetch(reason) {
     if (identityFetchPollTimer) { try { clearTimeout(identityFetchPollTimer); } catch (e) {} identityFetchPollTimer = null; }
+    if (identityFetchButtonTimer) { try { clearTimeout(identityFetchButtonTimer); } catch (e) {} identityFetchButtonTimer = null; }
     getIdentityFetchRecord(function (rec) {
       setIdentityFetchRecord({ inProgress: false, returnUrl: (rec && rec.returnUrl) || '', attemptedAt: (rec && rec.attemptedAt) || Date.now() });
     });
@@ -1192,8 +1194,25 @@
     }
   }
   function startProfileFetchClick() {
-    var btn = findProfileButton();
-    if (!btn) { failProfileFetch('Không thấy nút hồ sơ'); return; }
+    // v1.2.10: CHỜ nút hồ sơ hiện lên thay vì tìm 1 lần rồi kết luận ngay — trang
+    // TikTok lúc khởi động còn trắng/chưa tải xong header nên nút chưa tồn tại.
+    // Poll mỗi 400ms tối đa ~15s; hết giờ vẫn không có nút mới fail + log WATCHER_009.
+    var waitAttempts = 0;
+    var maxWaitAttempts = 38; // ~15.2s với bước 400ms
+    var waitForButton = function () {
+      var btn = findProfileButton();
+      if (!btn) {
+        waitAttempts++;
+        if (waitAttempts >= maxWaitAttempts) { failProfileFetch('Không thấy nút hồ sơ sau ~15s chờ trang tải'); return; }
+        identityFetchButtonTimer = setTimeout(waitForButton, 400);
+        return;
+      }
+      identityFetchButtonTimer = null;
+      clickProfileButtonAndWaitMenu(btn);
+    };
+    waitForButton();
+  }
+  function clickProfileButtonAndWaitMenu(btn) {
     var before = visibleAtLinks().map(function (a) { try { return a.getAttribute('href') || ''; } catch (e) { return ''; } });
     try { btn.click(); } catch (e) { failProfileFetch('Không bấm được nút hồ sơ'); return; }
     // Sau khi bấm, hoặc trình duyệt tự chuyển trang (nút là link), hoặc menu hiện ra chứa
@@ -1217,6 +1236,21 @@
       identityFetchPollTimer = setTimeout(poll, 400);
     };
     identityFetchPollTimer = setTimeout(poll, 400);
+  }
+  function retryProfileIdentityFetchFromScan() {
+    // v1.2.10: Quét ngay thử lại identity khi chưa có — hành động bấm nút của user
+    // chính là lệnh thử lại nên BỎ QUA khóa 30 phút cho đúng 1 lần thử này (không
+    // phải vòng lặp tự động); lần thử tay vẫn cập nhật attemptedAt để lần khởi động
+    // tự động sau đó không thử trùng ngay. Đã có identity thì không động vào luồng này.
+    if (!isMessagesPage()) return;
+    if (state.identity && state.identity.username) return;
+    if (cfg.account && cfg.account.replace(/^@/, '')) return;
+    getIdentityFetchRecord(function (rec) {
+      if (rec && rec.inProgress) return; // đang có chuyến đi hồ sơ chạy rồi, không chồng thêm
+      setIdentityFetchRecord({ inProgress: true, returnUrl: location.href, attemptedAt: Date.now() }, function () {
+        startProfileFetchClick();
+      });
+    });
   }
   function maybeStartProfileIdentityFetch() {
     if (!isMessagesPage()) return;
@@ -1302,6 +1336,7 @@
   try {
     chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       if (msg && msg.type === 'PANDA_SCAN_NOW') {
+        retryProfileIdentityFetchFromScan(); // v1.2.10: chưa có identity -> bấm Quét ngay cũng kích hoạt 1 chuyến đi hồ sơ
         scanAll(); flush(); heartbeat();
         // v1.2.9: log chẩn đoán quét danh sách — CHỈ SỐ LƯỢNG, không tên/xem trước/
         // nội dung. Chạy trên mọi lần quét tay, cả /messages lẫn business-suite/messages.
