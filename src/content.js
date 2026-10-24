@@ -14,7 +14,7 @@
   if (!CORE) return;
 
   var cfg = Object.assign({}, D);
-  var state = { account: '', identity: null, profileById: {}, profileByName: {}, domSeen: {}, startedAt: Date.now(), lastSync: null, lastPush: 0, pushedTotal: 0, capturedTotal: 0, captcha: false, lastError: '', queueBusy: false, listStats: null };
+  var state = { account: '', identity: null, profileById: {}, profileByName: {}, domSeen: {}, startedAt: Date.now(), lastSync: null, lastPush: 0, pushedTotal: 0, capturedTotal: 0, captcha: false, lastError: '', queueBusy: false, listStats: null, blockedUnknown: 0, scanTotal: 0, scanBlocked: 0, lastScanAllBlocked: false, lastBlockReason: '', lastLoggedBlocked: -1 };
   var pushedKeys = new Set();
   var buffer = [];
   var flushTimer = null;
@@ -62,6 +62,7 @@
   // lấy nhầm sẽ gắn sai tài khoản). Identity mạng (source 'tab') luôn thắng và không
   // bao giờ bị DOM ghi đè.
   var domIdentityLogged = '';
+  var domIdentityDiagLogged = false;   // v1.2.5: chỉ log chẩn đoán identity 1 lần/phiên, tránh spam mỗi nhịp
   function elInTopBar(node) {
     while (node) {
       var tag = node.tagName || '';
@@ -121,7 +122,26 @@
     if (state.identity && state.identity.source === 'tab') return state.identity;
     try {
       var cands = domIdentityCandidates();
-      if (!cands.length) return state.identity || null;
+      if (!cands.length) {
+        // v1.2.5 chẩn đoán (không đổi logic nhận diện): khi không khớp link nào, log 1 dòng
+        // BE ghi số link /@ trong vùng header và số gói allowlist đã thấy trong phiên
+        // (capturedTotal) để lần chẩn đoán sau có số liệu thay vì đoán.
+        if (!domIdentityDiagLogged) {
+          domIdentityDiagLogged = true;
+          var headerAtCount = 0;
+          try {
+            var atLinks = document.querySelectorAll('a');
+            var atRe = /^\/@([A-Za-z0-9._]{2,24})(?:[?#\/]|$)/;
+            for (var ai = 0; ai < atLinks.length; ai++) {
+              var ahref = '';
+              try { ahref = atLinks[ai].getAttribute ? (atLinks[ai].getAttribute('href') || '') : ''; } catch (e) {}
+              if (atRe.test(ahref) && elInTopBar(atLinks[ai])) headerAtCount++;
+            }
+          } catch (e) {}
+          logBE('WATCHER_IDENTITY_DIAG', 'Chẩn đoán identity DOM: 0 ứng viên — link /@ trong header: ' + headerAtCount + ', gói allowlist đã thấy trong phiên (capturedTotal): ' + state.capturedTotal, 'WATCHER_006');
+        }
+        return state.identity || null;
+      }
       var chosen = cands[0];
       if (state.identity && state.identity.username === chosen.username && state.identity.selector === chosen.selector) return state.identity;
       var id = { username: chosen.username, user_id: '', user_id_str: '', sec_user_id: '', screen_name: '', avatar_url: '', source: 'dom', selector: chosen.selector };
@@ -168,7 +188,7 @@
     // Fallback: khoi chua ten trong cot Tin nhan (khi class hash doi, selector cu khong trung)
     var heads = Array.prototype.slice.call(document.querySelectorAll('h2'));
     for (var h = 0; h < heads.length; h++) {
-      if (normText(heads[h].innerText) !== 'tin nhan') continue;
+      if (normText(heads[h].innerText).indexOf('tin nhan') !== 0) continue;   // v1.2.5: kèm badge vẫn khớp
       var col = heads[h].parentElement;
       if (!col) continue;
       var divs = col.querySelectorAll('div');
@@ -258,9 +278,31 @@
     } catch (e) {}
   });
 
+  /* ---------- v1.2.6: Gate chặn dòng không rõ đối tác (luật của user) ---------- */
+  // Data không kèm @username/tên đối tác thì KHÔNG được lưu lặng lẽ thành 'unknown'
+  // vào DB — chặn ngay tại enqueue (trước khi vào buffer/flush), đếm vào
+  // blockedUnknown, báo lỗi rõ qua log BE + chip + popup. Chỉ chặn dòng không rõ
+  // đối tác; dòng hợp lệ trong cùng đợt vẫn đẩy bình thường.
+  // Lý do chặn: (a) không tìm được tiêu đề hội thoại (cả tên lẫn @username đều rỗng);
+  // (b) tên đối tác không đọc được (slug rỗng -> fan_username rơi về 'unknown').
+  function unknownCounterpartReason(raw, row) {
+    var name = (raw.counterpartName || '').trim();
+    var user = (raw.counterpartUsername || '').trim();
+    if (!name && !user) return 'không tìm được tiêu đề hội thoại';
+    if (row && row.fan_username === 'unknown') return 'tên đối tác không đọc được (slug rỗng)';
+    return '';
+  }
   function enqueue(raw) {
     var row = CORE.normalizeMessage(raw, cfg.source);
     if (!row) return;
+    state.scanTotal++;
+    var reason = unknownCounterpartReason(raw, row);
+    if (reason) {
+      state.scanBlocked++;
+      state.blockedUnknown++;
+      state.lastBlockReason = reason;
+      return;
+    }
     if (pushedKeys.has(row.dedupe_key)) return;
     pushedKeys.add(row.dedupe_key);
     buffer.push(row);
@@ -335,7 +377,7 @@
       for (var i = 0; i < heads.length; i++) {
         var t = (heads[i].innerText || '').trim();
         if (!t || t.length > 80) continue;
-        if (normText(t) === 'tin nhan') continue;
+        if (normText(t).indexOf('tin nhan') === 0) continue;   // v1.2.5: tiêu đề kèm badge ("Tin nhắn 1857") cũng là tiêu đề danh sách, không phải tên hội thoại
         return t;
       }
     } catch (e) {}
@@ -365,9 +407,11 @@
     try { return el && el.scrollHeight > el.clientHeight + 20; } catch (e) { return false; }
   }
   function containsListHeader(el) {
+    // v1.2.5: tiêu đề thật có thể kèm badge/số lượng ("Tin nhắn 1857") nên chỉ cần
+    // normText BẮT ĐẦU BẰNG "tin nhan", không đòi bằng đúng như trước.
     try {
       var heads = el.querySelectorAll('h2');
-      for (var i = 0; i < heads.length; i++) { if (normText(heads[i].innerText) === 'tin nhan') return true; }
+      for (var i = 0; i < heads.length; i++) { if (normText(heads[i].innerText).indexOf('tin nhan') === 0) return true; }
     } catch (e) {}
     return false;
   }
@@ -379,23 +423,55 @@
   function findListColumn() {
     // Cột danh sách = cột chứa tiêu đề h2 "Tin nhắn". Đi ngược từ h2 lên trong khi
     // phần tử cha vẫn hẹp (<= 55% bề rộng trang) — cột danh sách luôn hẹp hơn cột chat.
+    // v1.2.5: (a) h2 chỉ cần BẮT ĐẦU BẰNG "tin nhan" (kèm badge/số lượng vẫn khớp);
+    // (b) không tìm được h2 thì fallback theo vị trí: cột hẹp nhất bên trái (<= 55%
+    // bề rộng trang) chứa nhiều ảnh đại diện nhất — đó là cột danh sách.
     try {
       var heads = document.querySelectorAll('h2');
       var h = null;
-      for (var i = 0; i < heads.length; i++) { if (normText(heads[i].innerText) === 'tin nhan') { h = heads[i]; break; } }
-      if (!h) return null;
-      var bodyW = 0;
-      try { bodyW = document.body.getBoundingClientRect().width; } catch (e) {}
-      var cur = h.parentElement;
-      if (!cur) return h;
-      while (cur && cur.parentElement && cur.parentElement !== document.body) {
-        var pr = null;
-        try { pr = cur.parentElement.getBoundingClientRect(); } catch (e) { break; }
-        if (!pr || pr.width <= 0) break;
-        if (bodyW && pr.width > bodyW * 0.55) break;
-        cur = cur.parentElement;
+      for (var i = 0; i < heads.length; i++) { if (normText(heads[i].innerText).indexOf('tin nhan') === 0) { h = heads[i]; break; } }
+      if (h) {
+        var bodyW = 0;
+        try { bodyW = document.body.getBoundingClientRect().width; } catch (e) {}
+        var cur = h.parentElement;
+        if (!cur) return h;
+        while (cur && cur.parentElement && cur.parentElement !== document.body) {
+          var pr = null;
+          try { pr = cur.parentElement.getBoundingClientRect(); } catch (e) { break; }
+          if (!pr || pr.width <= 0) break;
+          if (bodyW && pr.width > bodyW * 0.55) break;
+          cur = cur.parentElement;
+        }
+        return cur;
       }
-      return cur;
+      var bodyW2 = 0;
+      try { bodyW2 = document.body.getBoundingClientRect().width; } catch (e) {}
+      if (!bodyW2) return null;
+      var imgs = document.querySelectorAll('img');
+      var cands = [];
+      function candCount(el) {
+        for (var ci = 0; ci < cands.length; ci++) { if (cands[ci].el === el) return cands[ci]; }
+        var c = { el: el, count: 0, left: 1e9 };
+        try { c.left = el.getBoundingClientRect().left; } catch (e) {}
+        cands.push(c);
+        return c;
+      }
+      for (var ii = 0; ii < imgs.length; ii++) {
+        var anc = imgs[ii].parentElement, colCand = null;
+        while (anc && anc !== document.body) {
+          var r = null;
+          try { r = anc.getBoundingClientRect(); } catch (e) { break; }
+          if (!r || r.width <= 0 || r.width > bodyW2 * 0.55) break;
+          colCand = anc;
+          anc = anc.parentElement;
+        }
+        if (colCand) candCount(colCand).count++;
+      }
+      var best = null;
+      for (var bi = 0; bi < cands.length; bi++) {
+        if (!best || cands[bi].count > best.count || (cands[bi].count === best.count && cands[bi].left < best.left)) best = cands[bi];
+      }
+      return best ? best.el : null;
     } catch (e) { return null; }
   }
   function findChatPaneFallback() {
@@ -455,12 +531,17 @@
 
   function domScan() {
     if (!cfg.captureEnabled || location.pathname.indexOf('/messages') === -1) return;
+    // v1.2.6: reset bộ đếm theo lần quét — phục vụ gate chặn + trạng thái "toàn bộ bị chặn"
+    state.scanTotal = 0; state.scanBlocked = 0; state.lastScanAllBlocked = false;
     detectDomIdentity();
     try {
       var composer = findComposer();
-      var pane = null;
-      if (composer) pane = findMessagePane(composer);
-      if (!pane) pane = findChatPaneFallback();   // v1.2.4 (b): không có ô soạn vẫn quét được cột phải
+      // v1.2.5: KHÔNG có ô soạn (không mở hội thoại nào) thì trả về 0, KHÔNG đoán khung
+      // chat — đoán khung khi không có hội thoại mở là nguồn sinh khối rác ở v1.2.4.
+      // Chỉ dùng fallback (b)/(c) khi đã có ô soạn mà xác định khung thất bại.
+      if (!composer) return;
+      var pane = findMessagePane(composer);
+      if (!pane) pane = findChatPaneFallback();
       var listCol = null, pr = null, midX = 0;
       if (pane) {
         pr = pane.getBoundingClientRect();
@@ -481,12 +562,19 @@
       var title = conversationTitle();
       var partnerUser = (title && state.profileByName[CORE.normName(title)]) || '';
       // Nhánh chứa ô soạn trong pane (để loại khỏi vùng quét khi pane là cột chat rộng)
+      // v1.2.5: CHỈ tính nhánh khi pane là khung chat thật. Khi pane = document.body
+      // (fallback (c)), nhánh đi ngược tới con trực tiếp của body sẽ là CẢ cột chat
+      // nên mọi tin trong cột đều bị loại nhầm — trường hợp này để composerBranch = null
+      // (bản thân ô soạn vẫn bị loại bởi check el === composer; wrapper chỉ chứa ô soạn
+      // có innerText rỗng nên tự bị loại).
       var composerBranch = null;
-      (function () {
-        var n = composer;
-        while (n && n.parentElement && n.parentElement !== pane) n = n.parentElement;
-        if (n && n.parentElement === pane) composerBranch = n;
-      })();
+      if (pane !== document.body) {
+        (function () {
+          var n = composer;
+          while (n && n.parentElement && n.parentElement !== pane) n = n.parentElement;
+          if (n && n.parentElement === pane) composerBranch = n;
+        })();
+      }
       var nodes = pane.querySelectorAll('*');
       for (var i = 0; i < nodes.length; i++) {
         var el = nodes[i];
@@ -511,6 +599,7 @@
         if (dup) continue;
         var txt = stripTimeLines(rawText);
         if (!txt || txt.length > 2000) continue;
+        if (txt.split('\n').length > 15) continue;   // v1.2.5: bỏ khối container quá khổ (56-84 dòng lọt qua ở v1.2.4), không thể là 1 tin nhắn
         if (title && normText(txt) === normText(title)) continue;   // tiêu đề, không phải tin
         var isOut = (r.left + r.width / 2) > midX;
         var rowText = '';
@@ -527,6 +616,17 @@
       }
       state.account = guessAccount();
     } catch (e) {}
+    // v1.2.6: tổng kết lần quét — dòng không rõ đối tác KHÔNG lưu lặng lẽ mà báo lỗi rõ.
+    // Toàn bộ dòng bị chặn -> trạng thái lỗi nổi bật trên chip (không còn "đang canh").
+    state.lastScanAllBlocked = state.scanTotal > 0 && state.scanBlocked >= state.scanTotal;
+    if (state.scanBlocked > 0) {
+      // Chỉ log khi số dòng bị chặn thay đổi (tránh spam 1 log/20s khi cùng 1 đợt rác còn đó)
+      if (state.scanBlocked !== state.lastLoggedBlocked) {
+        logBE('WATCHER_BLOCKED', 'Tin không rõ đối tác — đã chặn, không đẩy DB (số dòng: ' + state.scanBlocked + ') — lý do: ' + (state.lastBlockReason || 'không rõ đối tác'), 'WATCHER_008');
+        state.lastLoggedBlocked = state.scanBlocked;
+      }
+      saveStats(); renderChip();
+    }
   }
 
   /* ---------- v1.2.4: Quét DANH SÁCH hội thoại (không cần mở hội thoại) ---------- */
@@ -583,7 +683,7 @@
       if (lines.length < 2 || lines.length > 5) continue;   // wrapper nhiều dòng không phải 1 dòng hội thoại
       var name = lines[0];
       if (!name || name.length > 60) continue;
-      if (normText(name) === 'tin nhan') continue;
+      if (normText(name).indexOf('tin nhan') === 0) continue;   // v1.2.5: khối tiêu đề kèm badge cũng không phải dòng hội thoại
       var isHeaderLine = false;
       for (var h = 0; h < Math.min(3, lines.length); h++) {
         var nh = normText(lines[h]);
@@ -607,12 +707,22 @@
   function listScan() {
     if (!cfg.captureEnabled || location.pathname.indexOf('/messages') === -1) return;
     try {
-      var col = findListColumn();
-      if (!col) return;
-      var rows = extractListRows(col);
-      if (!rows.length) return;
-      var acctKey = cfg.accountId || (state.identity && state.identity.username) || state.account || '';
+      // v1.2.5: LUÔN set listStats kể cả khi không tìm được cột hoặc 0 dòng, kèm reason
+      // để popup phân biệt được "chưa quét" / "chưa tìm thấy cột" / "0 hội thoại".
       var now = new Date().toISOString();
+      var col = findListColumn();
+      if (!col) {
+        state.listStats = { total: 0, unread: 0, reason: 'no-column', at: now };
+        saveStats(); renderChip();
+        return;
+      }
+      var rows = extractListRows(col);
+      if (!rows.length) {
+        state.listStats = { total: 0, unread: 0, reason: 'no-rows', at: now };
+        saveStats(); renderChip();
+        return;
+      }
+      var acctKey = cfg.accountId || (state.identity && state.identity.username) || state.account || '';
       var upserts = rows.map(function (r) {
         return {
           account_id: acctKey,
@@ -629,7 +739,7 @@
       var unreadCount = 0;
       for (var i = 0; i < rows.length; i++) { if (rows[i].unread === true) unreadCount++; }
       var changed = !state.listStats || state.listStats.total !== rows.length || state.listStats.unread !== unreadCount;
-      state.listStats = { total: rows.length, unread: unreadCount, at: now };
+      state.listStats = { total: rows.length, unread: unreadCount, reason: 'ok', at: now };
       saveStats(); renderChip();
       if (changed) logBE('WATCHER_LIST', 'Danh sách: ' + rows.length + ' hội thoại (' + unreadCount + ' chưa rep) -> Supabase', 'WATCHER_007');
     } catch (e) {}
@@ -651,13 +761,13 @@
   function heartbeat() {
     detectDomIdentity();
     state.account = guessAccount();
-    var value = { account: state.account, accountId: cfg.accountId || '', identitySource: state.identity ? (state.identity.source || 'tab') : '', url: location.href, at: new Date().toISOString(), version: '1.2.4', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError };
+    var value = { account: state.account, accountId: cfg.accountId || '', identitySource: state.identity ? (state.identity.source || 'tab') : '', url: location.href, at: new Date().toISOString(), version: '1.2.6', pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError, blockedUnknown: state.blockedUnknown };
     supa('app_state?on_conflict=key', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: { key: 'watcher_status', value: value, updated_at: new Date().toISOString() } }).catch(function () {});
     saveStats();
   }
   function saveStats() {
-    var st = { lastSync: state.lastSync, lastPush: state.lastPush, pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError, account: state.account, at: Date.now() };
-    if (state.listStats) { st.listTotal = state.listStats.total; st.listUnread = state.listStats.unread; }
+    var st = { lastSync: state.lastSync, lastPush: state.lastPush, pushedTotal: state.pushedTotal, capturedTotal: state.capturedTotal, captcha: state.captcha, lastError: state.lastError, account: state.account, at: Date.now(), blockedUnknown: state.blockedUnknown, lastScanAllBlocked: state.lastScanAllBlocked };
+    if (state.listStats) { st.listTotal = state.listStats.total; st.listUnread = state.listStats.unread; st.listReason = state.listStats.reason || 'ok'; }
     storageSet({ pandaWatcherStats: st });
   }
 
@@ -769,8 +879,13 @@
   function renderChip() {
     if (!chip) return;
     var hb = Math.round((Date.now() - state.startedAt) / 1000);
-    chip.innerHTML = '🐼 Panda Watcher ' + (state.captcha ? '<b style="color:#ff8a80">⛔ CAPTCHA — đã dừng</b>' : '<b style="color:#9fe8a9">● đang canh</b>') +
+    // v1.2.6: trạng thái lỗi nổi bật khi toàn bộ dòng của lần quét đều bị chặn;
+    // có dòng bị chặn thì luôn hiện dòng lỗi rõ, không chỉ hiện số đã đẩy như bình thường.
+    var head = state.captcha ? '<b style="color:#ff8a80">⛔ CAPTCHA — đã dừng</b>'
+      : (state.lastScanAllBlocked ? '<b style="color:#ff8a80">⛔ Lỗi quét — toàn bộ tin bị chặn</b>' : '<b style="color:#9fe8a9">● đang canh</b>');
+    chip.innerHTML = '🐼 Panda Watcher ' + head +
       '<br>Đã đẩy: <b>' + state.pushedTotal + '</b> tin · Bắt được: ' + state.capturedTotal + ' gói' +
+      (state.blockedUnknown > 0 ? '<br><span style="color:#ff8a80">Lỗi: có ' + state.blockedUnknown + ' tin không rõ người gửi đã bị chặn — cần sửa bộ quét</span>' : '') +
       (state.lastSync ? '<br>Đồng bộ cuối: ' + new Date(state.lastSync).toLocaleTimeString('vi-VN') : '') +
       (state.lastError ? '<br><span style="color:#ffb74d">' + state.lastError.slice(0, 120) + '</span>' : '') +
       '<br><span style="opacity:.75;font-size:11px">Chạy ' + hb + 's · Tự trả lời: ' + (cfg.autoSendEnabled ? 'BẬT' : 'tắt') + '</span>';

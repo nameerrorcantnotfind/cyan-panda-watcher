@@ -1,4 +1,7 @@
-// Cyan Panda Watcher — hook.js v1.2.2 (chạy trong page world của tiktok.com)
+// Cyan Panda Watcher — hook.js v1.2.3 (chạy trong MAIN world của tiktok.com)
+// v1.2.3: chạy thẳng dưới dạng content script MAIN world ở document_start (khai trong
+// manifest) để chặn fetch/XHR từ trước khi script của trang chạy — thay cho cơ chế cũ
+// chèn thẻ script ở document_idle (cài muộn, lỡ gói passport gọi rất sớm khi trang load).
 // Bắt các response JSON mà CHÍNH trang TikTok tự gọi (fetch/XHR) rồi chuyển sang content script
 // qua window.postMessage. Không thay đổi request/response gốc — chỉ sao chép dữ liệu trang đã nhận.
 //

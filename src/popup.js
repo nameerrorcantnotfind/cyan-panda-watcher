@@ -1,4 +1,4 @@
-// Cyan Panda Watcher — popup.js (v1.2.4)
+// Cyan Panda Watcher — popup.js (v1.2.6)
 // v1.2.3: ghi chú nguồn identity — 'tab TikTok' = gói mạng passport, 'tab TikTok (DOM)' =
 // fallback nhận diện từ link avatar header khi gói mạng không về. Các tính năng v1.2.1 giữ
 // nguyên: ID + username tự nhận, mọi nút bấm đều hiện toast + cập nhật trạng thái.
@@ -49,8 +49,19 @@
         $('stDetail').textContent = 'Mở 1 tab tiktok.com (đã đăng nhập) là Watcher tự khởi động.';
       }
       // v1.2.4: dòng trạng thái danh sách — số hội thoại + số chưa rep (từ listScan)
-      if (st.listTotal !== undefined && st.listTotal !== null) $('stList').textContent = 'Danh sách: ' + st.listTotal + ' hội thoại (' + (st.listUnread || 0) + ' chưa rep)';
+      // v1.2.5: phân biệt rõ lý do — chưa chạy lần nào / không tìm thấy cột / 0 dòng / có dữ liệu
+      if (st.listTotal !== undefined && st.listTotal !== null) {
+        if (st.listReason === 'no-column') $('stList').textContent = 'Danh sách: chưa tìm thấy cột';
+        else if (st.listReason === 'no-rows') $('stList').textContent = 'Danh sách: 0 hội thoại';
+        else $('stList').textContent = 'Danh sách: ' + st.listTotal + ' hội thoại (' + (st.listUnread || 0) + ' chưa rep)';
+      }
       else $('stList').textContent = 'Danh sách: chưa quét';
+      // v1.2.6: dòng trạng thái chặn — số tin không rõ người gửi đã bị chặn thay vì lưu 'unknown'
+      if (st.blockedUnknown !== undefined && st.blockedUnknown !== null) {
+        $('stBlocked').textContent = 'Đã chặn: ' + st.blockedUnknown + ' tin không rõ người gửi';
+        if (st.blockedUnknown > 0 && st.at && age < 180) $('stDetail').textContent += ' · ⛔ Đã chặn ' + st.blockedUnknown + ' tin không rõ người gửi';
+      }
+      else $('stBlocked').textContent = 'Đã chặn: chưa có dữ liệu';
     });
   }
 
